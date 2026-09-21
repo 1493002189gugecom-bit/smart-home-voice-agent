@@ -1,6 +1,8 @@
 import json
 from dataclasses import dataclass
 
+from model import AIR_CONDITIONERS, LIGHTS
+
 
 @dataclass(frozen=True)
 class Publication:
@@ -11,12 +13,21 @@ class Publication:
 
 
 def command_topics(prefix="shv"):
-    return {
-        "living_room_light": f"{prefix}/living_room_light/set",
-        "bedroom_ac_mode": f"{prefix}/bedroom_ac/mode/set",
-        "bedroom_ac_temperature": f"{prefix}/bedroom_ac/temperature/set",
-        "desk_plug": f"{prefix}/desk_plug/set",
-    }
+    topics = {device: f"{prefix}/{device}/set" for device in LIGHTS}
+    topics.update(
+        {
+            f"{device}_mode": f"{prefix}/{device}/mode/set"
+            for device in AIR_CONDITIONERS
+        }
+    )
+    topics.update(
+        {
+            f"{device}_temperature": f"{prefix}/{device}/temperature/set"
+            for device in AIR_CONDITIONERS
+        }
+    )
+    topics["desk_plug"] = f"{prefix}/desk_plug/set"
+    return topics
 
 
 def command_publications_for_tests(prefix="shv"):
@@ -34,7 +45,11 @@ def command_publications_for_tests(prefix="shv"):
 # home-service catalog matches on.
 CHINESE_LABELS = {
     "shv_living_room_light": "客厅灯",
+    "shv_bedroom_light": "卧室灯",
+    "shv_kitchen_light": "厨房灯",
+    "shv_living_room_ac": "客厅空调",
     "shv_bedroom_ac": "卧室空调",
+    "shv_kitchen_ac": "厨房空调",
     "shv_desk_plug": "智能插座",
     "shv_indoor_temperature": "室内温度",
 }
@@ -77,43 +92,52 @@ def _availability(prefix, device_id):
 
 
 def discovery_messages(prefix="shv"):
-    return [
-        Publication(
-            "homeassistant/light/shv_living_room_light/config",
-            json.dumps(
-                {
-                    "name": entity_name("shv_living_room_light"),
-                    "unique_id": "shv_living_room_light",
-                    "command_topic": f"{prefix}/living_room_light/set",
-                    "state_topic": f"{prefix}/living_room_light/state",
-                    "schema": "json",
-                    "brightness": True,
-                    "brightness_scale": 100,
-                    **_availability(prefix, "living_room_light"),
-                },
-                ensure_ascii=False,
-            ),
-        ),
-        Publication(
-            "homeassistant/climate/shv_bedroom_ac/config",
-            json.dumps(
-                {
-                    "name": entity_name("shv_bedroom_ac"),
-                    "unique_id": "shv_bedroom_ac",
-                    "mode_command_topic": f"{prefix}/bedroom_ac/mode/set",
-                    "mode_state_topic": f"{prefix}/bedroom_ac/mode/state",
-                    "temperature_command_topic": f"{prefix}/bedroom_ac/temperature/set",
-                    "temperature_state_topic": f"{prefix}/bedroom_ac/temperature/state",
-                    "current_temperature_topic": f"{prefix}/indoor_temperature/state",
-                    "modes": ["off", "cool", "fan_only"],
-                    "min_temp": 16,
-                    "max_temp": 30,
-                    "temp_step": 0.5,
-                    **_availability(prefix, "bedroom_ac"),
-                },
-                ensure_ascii=False,
-            ),
-        ),
+    messages = []
+    for device in LIGHTS:
+        unique_id = f"shv_{device}"
+        messages.append(
+            Publication(
+                f"homeassistant/light/{unique_id}/config",
+                json.dumps(
+                    {
+                        "name": entity_name(unique_id),
+                        "unique_id": unique_id,
+                        "command_topic": f"{prefix}/{device}/set",
+                        "state_topic": f"{prefix}/{device}/state",
+                        "schema": "json",
+                        "brightness": True,
+                        "brightness_scale": 100,
+                        **_availability(prefix, device),
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+        )
+    for device in AIR_CONDITIONERS:
+        unique_id = f"shv_{device}"
+        messages.append(
+            Publication(
+                f"homeassistant/climate/{unique_id}/config",
+                json.dumps(
+                    {
+                        "name": entity_name(unique_id),
+                        "unique_id": unique_id,
+                        "mode_command_topic": f"{prefix}/{device}/mode/set",
+                        "mode_state_topic": f"{prefix}/{device}/mode/state",
+                        "temperature_command_topic": f"{prefix}/{device}/temperature/set",
+                        "temperature_state_topic": f"{prefix}/{device}/temperature/state",
+                        "current_temperature_topic": f"{prefix}/indoor_temperature/state",
+                        "modes": ["off", "cool", "fan_only"],
+                        "min_temp": 16,
+                        "max_temp": 30,
+                        "temp_step": 0.5,
+                        **_availability(prefix, device),
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+        )
+    messages.extend([
         Publication(
             "homeassistant/switch/shv_desk_plug/config",
             json.dumps(
@@ -142,36 +166,42 @@ def discovery_messages(prefix="shv"):
                 ensure_ascii=False,
             ),
         ),
-    ]
+    ])
+    return messages
 
 
 def state_messages(state, prefix="shv"):
-    light = state["living_room_light"]
-    ac = state["bedroom_ac"]
     plug = state["desk_plug"]
     sensor = state["indoor_temperature"]
-    return [
-        Publication(
-            f"{prefix}/living_room_light/state",
-            json.dumps(light, ensure_ascii=False, sort_keys=True),
-        ),
-        Publication(f"{prefix}/bedroom_ac/mode/state", ac["mode"]),
-        Publication(
-            f"{prefix}/bedroom_ac/temperature/state",
-            str(ac["target_temperature"]),
-        ),
+    messages = [
+        Publication(f"{prefix}/{device}/state", json.dumps(state[device], ensure_ascii=False, sort_keys=True))
+        for device in LIGHTS
+    ]
+    for device in AIR_CONDITIONERS:
+        ac = state[device]
+        messages.extend(
+            [
+                Publication(f"{prefix}/{device}/mode/state", ac["mode"]),
+                Publication(
+                    f"{prefix}/{device}/temperature/state",
+                    str(ac["target_temperature"]),
+                ),
+            ]
+        )
+    messages.extend([
         Publication(f"{prefix}/desk_plug/state", plug["state"]),
         Publication(
             f"{prefix}/indoor_temperature/state", str(sensor["temperature"])
         ),
-    ]
+    ])
+    return messages
 
 
 def parse_command_topic(topic, prefix="shv"):
     known = {
-        ("living_room_light", "set"),
-        ("bedroom_ac", "mode/set"),
-        ("bedroom_ac", "temperature/set"),
+        *( (device, "set") for device in LIGHTS ),
+        *( (device, "mode/set") for device in AIR_CONDITIONERS ),
+        *( (device, "temperature/set") for device in AIR_CONDITIONERS ),
         ("desk_plug", "set"),
     }
     parts = topic.split("/")

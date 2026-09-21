@@ -25,6 +25,20 @@
       "state": { "on": false, "mode": "cool", "target_temp": 26.0 }
     },
     {
+      "id": "desk_plug",
+      "room_id": "living_room",
+      "type": "switch",
+      "name": "客厅的智能插座",
+      "state": { "on": false, "power": 0 }
+    },
+    {
+      "id": "indoor_temperature",
+      "room_id": "living_room",
+      "type": "sensor",
+      "name": "室内温度",
+      "state": { "temperature": 26.0 }
+    },
+    {
       "id": "bedroom_light",
       "room_id": "bedroom",
       "type": "light",

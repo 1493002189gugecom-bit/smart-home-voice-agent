@@ -39,10 +39,30 @@ class FakeGateway:
                 "attributes": {"brightness": 0},
                 "last_updated": "light-v1",
             },
+            "climate.shv_living_room_ac": {
+                "state": "off",
+                "attributes": {"temperature": 26, "current_temperature": 26},
+                "last_updated": "living-ac-v1",
+            },
+            "light.shv_bedroom_light": {
+                "state": "off",
+                "attributes": {"brightness": 0},
+                "last_updated": "bedroom-light-v1",
+            },
             "climate.shv_bedroom_ac": {
                 "state": "off",
                 "attributes": {"temperature": 26, "current_temperature": 26},
                 "last_updated": "ac-v1",
+            },
+            "light.shv_kitchen_light": {
+                "state": "off",
+                "attributes": {"brightness": 0},
+                "last_updated": "kitchen-light-v1",
+            },
+            "climate.shv_kitchen_ac": {
+                "state": "off",
+                "attributes": {"temperature": 26, "current_temperature": 26},
+                "last_updated": "kitchen-ac-v1",
             },
             "switch.shv_desk_plug": {
                 "state": "off",
@@ -189,14 +209,22 @@ def test_gateway_classifies_http_5xx_as_unavailable_or_submission_unknown():
     assert call_error.value.may_have_submitted is True
 
 
-def test_catalog_has_exactly_four_entities_and_normalizes_all_types():
+def test_project_catalog_maps_all_eight_scene_devices():
     catalog = load_catalog(CATALOG_PATH)
     assert set(catalog) == {
         "living_room_light",
-        "bedroom_ac",
+        "living_room_ac",
         "desk_plug",
         "indoor_temperature",
+        "bedroom_light",
+        "bedroom_ac",
+        "kitchen_light",
+        "kitchen_ac",
     }
+    assert catalog["living_room_ac"]["entity_id"] == "climate.shv_living_room_ac"
+    assert catalog["bedroom_light"]["entity_id"] == "light.shv_bedroom_light"
+    assert catalog["kitchen_light"]["entity_id"] == "light.shv_kitchen_light"
+    assert catalog["kitchen_ac"]["entity_id"] == "climate.shv_kitchen_ac"
     assert catalog["living_room_light"]["domain"] == "light"
     assert catalog["living_room_light"]["services"] == {"on": "turn_on", "off": "turn_off"}
     assert catalog["living_room_light"]["confirmation"]["brightness_scale"] == 255
@@ -222,6 +250,14 @@ def test_catalog_has_exactly_four_entities_and_normalizes_all_types():
     assert sensor["state"] == {"temperature": 26.25}
 
 
+def test_direct_constructor_reports_eight_device_catalog_contract(tmp_path):
+    incomplete_catalog = load_catalog(CATALOG_PATH)
+    incomplete_catalog.pop("kitchen_ac")
+
+    with pytest.raises(ValueError, match="HA entity catalog must contain exactly eight devices"):
+        HAServiceApp(FakeGateway(), incomplete_catalog, tmp_path / "ops.sqlite3")
+
+
 def test_unavailable_entity_is_offline():
     catalog = load_catalog(CATALOG_PATH)
     entity = normalize_entity(catalog["living_room_light"], {
@@ -235,11 +271,11 @@ def test_health_and_queries_are_backed_by_ha(tmp_path):
     app = make_app(tmp_path, gateway)
     assert get(app, "/health")[1]["ok"] is True
     devices = get(app, "/tool/device_status")[1]["data"]["devices"]
-    assert len(devices) == 4
+    assert len(devices) == 8
     assert get(app, "/tool/device_status", device="living_room_light")[1]["data"]["devices"][0]["id"] == "living_room_light"
     rooms = get(app, "/tool/room_status", room="客厅")[1]["data"]["rooms"]
     assert {device["id"] for device in rooms[0]["devices"]} == {
-        "living_room_light", "desk_plug", "indoor_temperature"
+        "living_room_light", "living_room_ac", "desk_plug", "indoor_temperature"
     }
 
 

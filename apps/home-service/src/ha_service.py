@@ -14,7 +14,11 @@ from operation_store import Operation, OperationConflict, OperationStore
 
 DEVICE_IDS = {
     "living_room_light",
+    "living_room_ac",
     "bedroom_ac",
+    "bedroom_light",
+    "kitchen_light",
+    "kitchen_ac",
     "desk_plug",
     "indoor_temperature",
 }
@@ -63,7 +67,7 @@ def load_catalog(path: str | Path) -> dict[str, dict[str, Any]]:
     """
     value = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(value, dict) or set(value) != DEVICE_IDS:
-        raise ValueError("HA entity catalog must contain exactly four devices")
+        raise ValueError("HA entity catalog must contain exactly eight devices")
     required = {
         "entity_id",
         "type",
@@ -283,7 +287,7 @@ class HAServiceApp:
             copied["id"] = device_id
             self.catalog[device_id] = copied
         if set(self.catalog) != DEVICE_IDS:
-            raise ValueError("HA entity catalog must contain exactly four devices")
+            raise ValueError("HA entity catalog must contain exactly eight devices")
         self.scenes = dict(scenes or {})
         self.store = OperationStore(database)
         self.confirmation_timeout = float(confirmation_timeout)

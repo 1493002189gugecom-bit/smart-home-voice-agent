@@ -15,6 +15,31 @@
       "brightness_scale": 255
     }
   },
+  "living_room_ac": {
+    "entity_id": "climate.shv_living_room_ac",
+    "type": "ac",
+    "domain": "climate",
+    "name": "客厅空调",
+    "room_id": "living_room",
+    "room_name": "客厅",
+    "area_id": "ke_ting",
+    "services": {
+      "mode": "set_hvac_mode",
+      "temperature": "set_temperature"
+    },
+    "confirmation": {
+      "modes": [
+        "off",
+        "cool",
+        "fan_only"
+      ],
+      "min_temp": 16,
+      "max_temp": 30,
+      "default_mode": "cool",
+      "comfort_temp": 26,
+      "temp_step": 0.5
+    }
+  },
   "bedroom_ac": {
     "entity_id": "climate.shv_bedroom_ac",
     "type": "ac",
@@ -37,7 +62,64 @@
       "max_temp": 30,
       "default_mode": "cool",
       "comfort_temp": 26,
-      "temp_step": 1
+      "temp_step": 0.5
+    }
+  },
+  "bedroom_light": {
+    "entity_id": "light.shv_bedroom_light",
+    "type": "light",
+    "domain": "light",
+    "name": "卧室灯",
+    "room_id": "bedroom",
+    "room_name": "卧室",
+    "area_id": "wo_shi",
+    "services": {
+      "on": "turn_on",
+      "off": "turn_off"
+    },
+    "confirmation": {
+      "brightness_scale": 255
+    }
+  },
+  "kitchen_light": {
+    "entity_id": "light.shv_kitchen_light",
+    "type": "light",
+    "domain": "light",
+    "name": "厨房灯",
+    "room_id": "kitchen",
+    "room_name": "厨房",
+    "area_id": "chu_fang",
+    "services": {
+      "on": "turn_on",
+      "off": "turn_off"
+    },
+    "confirmation": {
+      "brightness_scale": 255
+    }
+  },
+  "kitchen_ac": {
+    "entity_id": "climate.shv_kitchen_ac",
+    "type": "ac",
+    "domain": "climate",
+    "name": "厨房空调",
+    "room_id": "kitchen",
+    "room_name": "厨房",
+    "area_id": "chu_fang",
+    "services": {
+      "mode": "set_hvac_mode",
+      "temperature": "set_temperature"
+    },
+    "confirmation": {
+      "modes": [
+        "off",
+        "cool",
+        "fan_only"
+      ],
+      "min_temp": 16,
+      "max_temp": 30,
+      "default_mode": "cool",
+      "comfort_temp": 26,
+      "temp_step": 0.5
     }
   },
   "desk_plug": {

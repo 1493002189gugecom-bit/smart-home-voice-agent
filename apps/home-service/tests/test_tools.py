@@ -31,7 +31,12 @@ def test_query_room_status_by_name(service):
     result = service.query_room_status("客厅")
     assert result.ok
     assert result.data["rooms"][0]["name"] == "客厅"
-    assert len(result.data["rooms"][0]["devices"]) == 2
+    assert {device["id"] for device in result.data["rooms"][0]["devices"]} == {
+        "living_room_light",
+        "living_room_ac",
+        "desk_plug",
+        "indoor_temperature",
+    }
 
 
 def test_query_unknown_room_fails(service):

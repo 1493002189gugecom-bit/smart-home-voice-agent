@@ -45,6 +45,22 @@ def test_snapshot_route_returns_full_state(app):
     assert len(payload["rooms"]) == 3
 
 
+def test_memory_snapshot_uses_all_eight_stable_device_ids(app):
+    status, payload = get(app, "/snapshot")
+
+    assert status == 200
+    assert {device["id"] for device in payload["devices"]} == {
+        "living_room_light",
+        "living_room_ac",
+        "desk_plug",
+        "indoor_temperature",
+        "bedroom_light",
+        "bedroom_ac",
+        "kitchen_light",
+        "kitchen_ac",
+    }
+
+
 def test_state_route_supports_since(app):
     _, health = get(app, "/health")
     version = health["version"]

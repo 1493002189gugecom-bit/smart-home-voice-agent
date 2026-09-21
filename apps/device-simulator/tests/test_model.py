@@ -4,7 +4,57 @@ import math
 
 import pytest
 
-from model import initial_state, transition, with_temperature, load_state, save_state
+from model import (
+    AIR_CONDITIONERS,
+    DEVICES,
+    LIGHTS,
+    initial_state,
+    transition,
+    with_temperature,
+    load_state,
+    save_state,
+)
+
+
+def test_initial_state_contains_all_scene_devices():
+    assert LIGHTS == ("living_room_light", "bedroom_light", "kitchen_light")
+    assert AIR_CONDITIONERS == ("living_room_ac", "bedroom_ac", "kitchen_ac")
+    assert set(initial_state()) == set(DEVICES) == {
+        "living_room_light", "living_room_ac", "desk_plug",
+        "indoor_temperature", "bedroom_light", "bedroom_ac",
+        "kitchen_light", "kitchen_ac",
+    }
+
+
+@pytest.mark.parametrize("device", ["living_room_light", "bedroom_light", "kitchen_light"])
+def test_every_light_accepts_the_same_command_contract(device):
+    changed = transition(initial_state(), device, "set", '{"state":"ON","brightness":35}')
+    assert changed[device] == {"state": "ON", "brightness": 35}
+
+
+@pytest.mark.parametrize("device", ["living_room_ac", "bedroom_ac", "kitchen_ac"])
+def test_every_ac_accepts_mode_and_temperature(device):
+    cooled = transition(initial_state(), device, "mode/set", "cool")
+    cooled = transition(cooled, device, "temperature/set", "18")
+    assert cooled[device]["mode"] == "cool"
+    assert cooled[device]["target_temperature"] == 18.0
+
+
+def test_load_migrates_the_previous_four_device_state(tmp_path):
+    path = tmp_path / "state.json"
+    old = {
+        "living_room_light": {"state": "ON", "brightness": 67},
+        "bedroom_ac": {"mode": "cool", "target_temperature": 22.0, "current_temperature": 26.0},
+        "desk_plug": {"state": "OFF", "power": 0},
+        "indoor_temperature": {"temperature": 26.0},
+    }
+    path.write_text(json.dumps(old), encoding="utf-8")
+    loaded = load_state(path)
+    assert loaded["living_room_light"]["brightness"] == 67
+    assert loaded["living_room_ac"] == initial_state()["living_room_ac"]
+    assert loaded["bedroom_light"] == initial_state()["bedroom_light"]
+    assert loaded["kitchen_light"] == initial_state()["kitchen_light"]
+    assert loaded["kitchen_ac"] == initial_state()["kitchen_ac"]
 
 
 def test_light_and_plug_transitions_are_pure():
@@ -64,7 +114,8 @@ def test_temperature_requires_finite_number(value):
 def test_temperature_updates_both_readings():
     state = with_temperature(initial_state(), 28.5)
     assert state["indoor_temperature"]["temperature"] == 28.5
-    assert state["bedroom_ac"]["current_temperature"] == 28.5
+    for device in AIR_CONDITIONERS:
+        assert state[device]["current_temperature"] == 28.5
 
 
 def test_atomic_persistence_and_validation(tmp_path):
@@ -82,14 +133,8 @@ def test_absent_persistence_uses_defaults(tmp_path):
     assert load_state(tmp_path / "missing.json") == initial_state()
 
 
-def test_load_rejects_missing_or_extra_devices(tmp_path):
+def test_load_rejects_extra_devices(tmp_path):
     path = tmp_path / "state.json"
-    missing = initial_state()
-    del missing["desk_plug"]
-    path.write_text(json.dumps(missing), encoding="utf-8")
-    with pytest.raises(ValueError, match="device set"):
-        load_state(path)
-
     extra = initial_state()
     extra["garage_door"] = {"state": "CLOSED"}
     path.write_text(json.dumps(extra), encoding="utf-8")

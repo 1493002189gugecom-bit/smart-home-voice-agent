@@ -7,6 +7,31 @@ Unity, and does not decide anything by itself: the Agent (Phase D) will call it.
 It binds to **127.0.0.1 only**. Requests to bind anywhere else are refused,
 because this service is never exposed to the LAN.
 
+## Read-only live events
+
+`GET /events` exposes a loopback-only Server-Sent Events stream for digital
+twin viewers. A connection receives a complete canonical `snapshot`
+immediately. Later snapshots are published only after a successful memory
+mutation or a configured Home Assistant entity emits `state_changed`.
+
+- Home Assistant authentication stays inside home-service. The token is never
+  sent to Blender or Unity.
+- Only entity IDs listed in `config/ha_entities.json` are observed; unrelated
+  Home Assistant events are ignored.
+- Changes arriving within 100 ms are combined into one complete snapshot, and
+  slow clients receive the newest snapshot instead of a backlog of stale ones.
+- The stream sends `: heartbeat` every 15 seconds while idle.
+- Home Assistant WebSocket reconnects back off through 1, 2, 4, 8, 16 and 30
+  seconds. `status` events report upstream disconnect/recovery without exposing
+  credentials or upstream response bodies.
+- The endpoint is read-only. `POST /events` is not registered.
+
+Example read-only inspection:
+
+```powershell
+curl.exe --no-buffer http://127.0.0.1:8765/events
+```
+
 ## Run
 
 ```powershell
@@ -92,7 +117,9 @@ Only `played` permits "已播报". `failed` never claims success.
 | `src/state.py` | Authoritative state, versions, increments, device writes |
 | `src/tools.py` | The six tools plus server-side validation |
 | `src/notify.py` | Multi-target notification planning |
-| `src/server.py` | Loopback JSON API |
+| `src/server.py` | Loopback JSON API and `GET /events` SSE transport |
+| `src/event_stream.py` | Canonical snapshots, bounded fan-out and SSE framing |
+| `src/ha_event_subscriber.py` | Authenticated, filtered HA WebSocket subscription |
 | `config/rooms.json` | Three rooms, six devices, three people |
 | `config/comfort.json` | Temperature limits and comfort default |
 

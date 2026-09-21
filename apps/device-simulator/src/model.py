@@ -5,17 +5,23 @@ import os
 from pathlib import Path
 
 
-DEVICES = ("living_room_light", "bedroom_ac", "desk_plug", "indoor_temperature")
+LIGHTS = ("living_room_light", "bedroom_light", "kitchen_light")
+AIR_CONDITIONERS = ("living_room_ac", "bedroom_ac", "kitchen_ac")
+DEVICES = (*LIGHTS, *AIR_CONDITIONERS, "desk_plug", "indoor_temperature")
+
+
+def _default_ac():
+    return {"mode": "off", "target_temperature": 26.0, "current_temperature": 26.0}
 
 
 def initial_state():
     return {
         "living_room_light": {"state": "OFF", "brightness": 50},
-        "bedroom_ac": {
-            "mode": "off",
-            "target_temperature": 26.0,
-            "current_temperature": 26.0,
-        },
+        "bedroom_light": {"state": "OFF", "brightness": 40},
+        "kitchen_light": {"state": "OFF", "brightness": 60},
+        "living_room_ac": _default_ac(),
+        "bedroom_ac": _default_ac(),
+        "kitchen_ac": _default_ac(),
         "desk_plug": {"state": "OFF", "power": 0},
         "indoor_temperature": {"temperature": 26.0},
     }
@@ -87,8 +93,10 @@ def _validate_persisted_sensor(record):
 def validate_state(state):
     if not isinstance(state, dict) or set(state) != set(DEVICES):
         raise ValueError("invalid device set")
-    _validate_persisted_light(state["living_room_light"])
-    _validate_persisted_ac(state["bedroom_ac"])
+    for device in LIGHTS:
+        _validate_persisted_light(state[device])
+    for device in AIR_CONDITIONERS:
+        _validate_persisted_ac(state[device])
     _validate_persisted_plug(state["desk_plug"])
     _validate_persisted_sensor(state["indoor_temperature"])
     return state
@@ -96,15 +104,15 @@ def validate_state(state):
 
 def transition(state, device, action, payload):
     current = validate_state(copy.deepcopy(state))
-    if device == "living_room_light" and action == "set":
+    if device in LIGHTS and action == "set":
         command = json.loads(payload)
         _validate_light_command(command)
         current[device].update(command)
-    elif device == "bedroom_ac" and action == "mode/set":
+    elif device in AIR_CONDITIONERS and action == "mode/set":
         if payload not in {"off", "cool", "fan_only"}:
             raise ValueError("invalid ac mode")
         current[device]["mode"] = payload
-    elif device == "bedroom_ac" and action == "temperature/set":
+    elif device in AIR_CONDITIONERS and action == "temperature/set":
         value = json.loads(payload)
         _finite_number("target_temperature", value, 16, 30)
         current[device]["target_temperature"] = float(value)
@@ -121,7 +129,8 @@ def with_temperature(state, value):
     _finite_number("temperature", value, -40, 85)
     changed = validate_state(copy.deepcopy(state))
     changed["indoor_temperature"]["temperature"] = float(value)
-    changed["bedroom_ac"]["current_temperature"] = float(value)
+    for device in AIR_CONDITIONERS:
+        changed[device]["current_temperature"] = float(value)
     return changed
 
 
@@ -129,7 +138,12 @@ def load_state(path):
     path = Path(path)
     if not path.exists():
         return initial_state()
-    return validate_state(json.loads(path.read_text(encoding="utf-8")))
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(persisted, dict) or not set(persisted).issubset(DEVICES):
+        raise ValueError("invalid device set")
+    migrated = initial_state()
+    migrated.update(persisted)
+    return validate_state(migrated)
 
 
 def save_state(path, state):

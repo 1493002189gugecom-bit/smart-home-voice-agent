@@ -128,15 +128,25 @@ def test_reconnect_republishes_discovery_availability_and_complete_state(tmp_pat
     assert publisher.last_raw("shv/status") == "online"
     for device in (
         "living_room_light",
+        "bedroom_light",
+        "kitchen_light",
+        "living_room_ac",
         "bedroom_ac",
+        "kitchen_ac",
         "desk_plug",
         "indoor_temperature",
     ):
         assert publisher.last_raw(f"shv/{device}/availability") == "online"
     for topic in (
         "shv/living_room_light/state",
+        "shv/bedroom_light/state",
+        "shv/kitchen_light/state",
+        "shv/living_room_ac/mode/state",
+        "shv/living_room_ac/temperature/state",
         "shv/bedroom_ac/mode/state",
         "shv/bedroom_ac/temperature/state",
+        "shv/kitchen_ac/mode/state",
+        "shv/kitchen_ac/temperature/state",
         "shv/desk_plug/state",
         "shv/indoor_temperature/state",
     ):

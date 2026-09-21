@@ -14,13 +14,17 @@ from discovery import (
 from model import initial_state
 
 
-def test_all_four_discovery_payloads_have_stable_ids_and_availability():
+def test_all_eight_discovery_payloads_have_stable_ids_and_availability():
     messages = discovery_messages("house")
-    assert len(messages) == 4
+    assert len(messages) == 8
     payloads = [json.loads(item.payload) for item in messages]
     assert {payload["unique_id"] for payload in payloads} == {
         "shv_living_room_light",
+        "shv_bedroom_light",
+        "shv_kitchen_light",
+        "shv_living_room_ac",
         "shv_bedroom_ac",
+        "shv_kitchen_ac",
         "shv_desk_plug",
         "shv_indoor_temperature",
     }
@@ -49,7 +53,11 @@ def test_payloads_have_no_device_block_so_entity_ids_stay_predictable():
 def test_chinese_labels_remain_documented_without_affecting_entity_ids():
     assert CHINESE_LABELS == {
         "shv_living_room_light": "客厅灯",
+        "shv_bedroom_light": "卧室灯",
+        "shv_kitchen_light": "厨房灯",
+        "shv_living_room_ac": "客厅空调",
         "shv_bedroom_ac": "卧室空调",
+        "shv_kitchen_ac": "厨房空调",
         "shv_desk_plug": "智能插座",
         "shv_indoor_temperature": "室内温度",
     }
@@ -58,18 +66,29 @@ def test_chinese_labels_remain_documented_without_affecting_entity_ids():
         assert slugify_entity_name(label) != unique_id
 
 
-def test_discovery_topics_and_light_brightness_contract_are_stable():
+def test_discovery_registers_all_eight_stable_entity_ids():
     messages = discovery_messages("shv")
-    assert [item.topic for item in messages] == [
+    assert len(messages) == 8
+    assert {message.topic for message in messages} == {
         "homeassistant/light/shv_living_room_light/config",
+        "homeassistant/light/shv_bedroom_light/config",
+        "homeassistant/light/shv_kitchen_light/config",
+        "homeassistant/climate/shv_living_room_ac/config",
         "homeassistant/climate/shv_bedroom_ac/config",
+        "homeassistant/climate/shv_kitchen_ac/config",
         "homeassistant/switch/shv_desk_plug/config",
         "homeassistant/sensor/shv_indoor_temperature/config",
-    ]
-    light = json.loads(messages[0].payload)
-    assert light["schema"] == "json"
-    assert light["brightness"] is True
-    assert light["brightness_scale"] == 100
+    }
+
+
+def test_every_light_discovery_payload_uses_json_brightness_scale_100():
+    payloads = {json.loads(item.payload)["unique_id"]: json.loads(item.payload)
+                for item in discovery_messages("shv")}
+    for device in ("living_room_light", "bedroom_light", "kitchen_light"):
+        light = payloads[f"shv_{device}"]
+        assert light["schema"] == "json"
+        assert light["brightness"] is True
+        assert light["brightness_scale"] == 100
 
 
 def test_entity_name_slugifies_to_the_stable_entity_id():
@@ -88,8 +107,14 @@ def test_entity_name_slugifies_to_the_stable_entity_id():
 def test_all_known_command_topics_are_explicit_and_never_retained():
     assert command_topics("shv") == {
         "living_room_light": "shv/living_room_light/set",
+        "bedroom_light": "shv/bedroom_light/set",
+        "kitchen_light": "shv/kitchen_light/set",
+        "living_room_ac_mode": "shv/living_room_ac/mode/set",
+        "living_room_ac_temperature": "shv/living_room_ac/temperature/set",
         "bedroom_ac_mode": "shv/bedroom_ac/mode/set",
         "bedroom_ac_temperature": "shv/bedroom_ac/temperature/set",
+        "kitchen_ac_mode": "shv/kitchen_ac/mode/set",
+        "kitchen_ac_temperature": "shv/kitchen_ac/temperature/set",
         "desk_plug": "shv/desk_plug/set",
     }
     publications = command_publications_for_tests("shv")
@@ -97,12 +122,24 @@ def test_all_known_command_topics_are_explicit_and_never_retained():
     assert all(not item.retain for item in publications)
 
 
+def test_complete_state_publication_has_eleven_retained_messages():
+    messages = state_messages(initial_state(), "shv")
+    assert len(messages) == 11
+    assert all(message.retain and message.qos == 1 for message in messages)
+
+
 def test_state_messages_are_complete_retained_and_use_prefix():
     messages = state_messages(initial_state(), "house")
     assert [item.topic for item in messages] == [
         "house/living_room_light/state",
+        "house/bedroom_light/state",
+        "house/kitchen_light/state",
+        "house/living_room_ac/mode/state",
+        "house/living_room_ac/temperature/state",
         "house/bedroom_ac/mode/state",
         "house/bedroom_ac/temperature/state",
+        "house/kitchen_ac/mode/state",
+        "house/kitchen_ac/temperature/state",
         "house/desk_plug/state",
         "house/indoor_temperature/state",
     ]
@@ -114,8 +151,14 @@ def test_state_messages_are_complete_retained_and_use_prefix():
     ("topic", "expected"),
     [
         ("shv/living_room_light/set", ("living_room_light", "set")),
+        ("shv/bedroom_light/set", ("bedroom_light", "set")),
+        ("shv/kitchen_light/set", ("kitchen_light", "set")),
+        ("shv/living_room_ac/mode/set", ("living_room_ac", "mode/set")),
+        ("shv/living_room_ac/temperature/set", ("living_room_ac", "temperature/set")),
         ("shv/bedroom_ac/mode/set", ("bedroom_ac", "mode/set")),
         ("shv/bedroom_ac/temperature/set", ("bedroom_ac", "temperature/set")),
+        ("shv/kitchen_ac/mode/set", ("kitchen_ac", "mode/set")),
+        ("shv/kitchen_ac/temperature/set", ("kitchen_ac", "temperature/set")),
         ("shv/desk_plug/set", ("desk_plug", "set")),
     ],
 )

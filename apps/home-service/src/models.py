@@ -24,6 +24,8 @@ def new_id(prefix: str) -> str:
 class DeviceType(str, Enum):
     LIGHT = "light"
     AC = "ac"
+    SWITCH = "switch"
+    SENSOR = "sensor"
     SPEAKER = "speaker"
 
 

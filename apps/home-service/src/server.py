@@ -8,13 +8,22 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from ha_gateway import HAGateway
+from ha_event_subscriber import HAEventSubscriber
 from ha_service import HAServiceApp, load_catalog, load_scenes
+from event_stream import (
+    EventHub,
+    StreamEvent,
+    canonical_ha_snapshot,
+    canonical_memory_snapshot,
+    encode_sse,
+)
 from models import VisualObservation, now_ms
 from notify import plan_notification
 from state import HomeState, StateError, build_default_state
@@ -276,8 +285,144 @@ def _broadcast_payload(task, state: HomeState) -> dict[str, Any]:
     return state._broadcast_view(task)
 
 
+class LiveStateStream:
+    """Connect an app backend to a bounded, read-only stream of snapshots."""
+
+    def __init__(self, app: Any, *, debounce_seconds: float = 0.1):
+        self.app = app
+        self.backend = "ha" if isinstance(app, HAServiceApp) else "memory"
+        self.hub = EventHub(history_size=32)
+        self._lock = threading.RLock()
+        self._sequence = 0
+        self._latest_snapshot: StreamEvent | None = None
+        self._debounce_seconds = debounce_seconds
+        self._debounce_timer: threading.Timer | None = None
+        self._subscriber: HAEventSubscriber | None = None
+        self._stopped = False
+
+        self.publish_snapshot()
+        if self.backend == "ha":
+            entity_ids = {
+                record["entity_id"] for record in app.catalog.values()
+                if isinstance(record.get("entity_id"), str)
+            }
+            self._subscriber = HAEventSubscriber(
+                app.gateway.url,
+                app.gateway.token,
+                entity_ids,
+                self._on_ha_change,
+                self._on_ha_status,
+            )
+
+    def start(self) -> None:
+        if self._subscriber is not None:
+            self._subscriber.start()
+
+    def stop(self) -> None:
+        with self._lock:
+            self._stopped = True
+            if self._debounce_timer is not None:
+                self._debounce_timer.cancel()
+                self._debounce_timer = None
+        if self._subscriber is not None:
+            self._subscriber.stop()
+
+    def snapshot_for_connection(self) -> StreamEvent:
+        with self._lock:
+            if self._latest_snapshot is None:
+                return self._publish_empty_snapshot_locked()
+            return self._latest_snapshot
+
+    def publish_snapshot(self) -> StreamEvent | None:
+        with self._lock:
+            if self._stopped:
+                return None
+            self._sequence += 1
+            sequence = self._sequence
+            generated = now_ms()
+            try:
+                if self.backend == "memory":
+                    payload = canonical_memory_snapshot(
+                        self.app.state.snapshot(),
+                        sequence=sequence,
+                        generated_at_ms=generated,
+                    )
+                else:
+                    status, response = self.app.handle("GET", "/tool/room_status", {}, {})
+                    if status != 200:
+                        raise RuntimeError("ha_snapshot_unavailable")
+                    payload = canonical_ha_snapshot(
+                        response,
+                        sequence=sequence,
+                        generated_at_ms=generated,
+                    )
+            except Exception:
+                self._sequence -= 1
+                self.hub.publish(
+                    "status",
+                    {"state": "snapshot_unavailable", "generated_at_ms": generated},
+                )
+                return None
+            self._latest_snapshot = self.hub.publish("snapshot", payload)
+            return self._latest_snapshot
+
+    def after_request(self, method: str, status: int) -> None:
+        if self.backend == "memory" and method == "POST" and 200 <= status < 300:
+            self.publish_snapshot()
+
+    def _publish_empty_snapshot_locked(self) -> StreamEvent:
+        self._sequence += 1
+        payload = {
+            "version": self._sequence,
+            "backend": self.backend,
+            "generated_at_ms": now_ms(),
+            "rooms": [],
+            "devices": [],
+            "persons": [],
+            "broadcasts": [],
+            "broadcast_queue": [],
+        }
+        self._latest_snapshot = self.hub.publish("snapshot", payload)
+        return self._latest_snapshot
+
+    def _on_ha_change(self, _entity_id: str) -> None:
+        with self._lock:
+            if self._stopped:
+                return
+            if self._debounce_timer is not None:
+                self._debounce_timer.cancel()
+            self._debounce_timer = threading.Timer(
+                self._debounce_seconds,
+                self.publish_snapshot,
+            )
+            self._debounce_timer.daemon = True
+            self._debounce_timer.start()
+
+    def _on_ha_status(self, state: str) -> None:
+        self.hub.publish("status", {"state": state, "generated_at_ms": now_ms()})
+        if state == "upstream_connected":
+            self._on_ha_change("")
+
+
+class _SSEThreadingHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def __init__(
+        self,
+        server_address,
+        handler,
+        stream: LiveStateStream,
+        heartbeat_seconds: float = 15.0,
+    ):
+        self.stream = stream
+        self.heartbeat_seconds = float(heartbeat_seconds)
+        super().__init__(server_address, handler)
+
+
 class _Handler(BaseHTTPRequestHandler):
-    app: HomeServiceApp
+    app: Any
+    protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt: str, *args) -> None:  # quiet console
         return
@@ -301,6 +446,9 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if parsed.path == "/events":
+            self._respond_sse()
+            return
         status, payload = self.app.handle("GET", parsed.path, parse_qs(parsed.query), {})
         self._respond(status, payload)
 
@@ -313,17 +461,65 @@ class _Handler(BaseHTTPRequestHandler):
             return
         status, payload = self.app.handle("POST", parsed.path, parse_qs(parsed.query), body)
         self._respond(status, payload)
+        self.server.stream.after_request("POST", status)
+
+    def _respond_sse(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+        initial = self.server.stream.snapshot_for_connection()
+        last_id = initial.id
+        try:
+            self.wfile.write(encode_sse(initial))
+            self.wfile.flush()
+            while True:
+                item = self.server.stream.hub.wait_after(
+                    last_id,
+                    self.server.heartbeat_seconds,
+                )
+                if item is None:
+                    payload = b": heartbeat\n\n"
+                else:
+                    payload = encode_sse(item)
+                    last_id = item.id
+                self.wfile.write(payload)
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
+        finally:
+            self.close_connection = True
+
+
+def create_server(
+    app: Any,
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
+    *,
+    heartbeat_seconds: float = 15.0,
+) -> _SSEThreadingHTTPServer:
+    stream = LiveStateStream(app)
+    handler = type("BoundHandler", (_Handler,), {"app": app})
+    server = _SSEThreadingHTTPServer(
+        (host, port),
+        handler,
+        stream,
+        heartbeat_seconds,
+    )
+    stream.start()
+    return server
 
 
 def serve(app: Any, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
-    handler = type("BoundHandler", (_Handler,), {"app": app})
-    server = ThreadingHTTPServer((host, port), handler)
+    server = create_server(app, host, port)
     print(f"home-service listening on http://{host}:{port} (loopback only)")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nstopped")
     finally:
+        server.stream.stop()
         server.server_close()
 
 

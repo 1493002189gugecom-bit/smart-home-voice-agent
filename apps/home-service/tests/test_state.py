@@ -20,9 +20,9 @@ def state() -> HomeState:
     return build_default_state(CONFIG)
 
 
-def test_default_house_has_three_rooms_and_six_devices(state):
+def test_default_house_has_three_rooms_and_eight_devices(state):
     assert set(state.rooms) == {"living_room", "bedroom", "kitchen"}
-    assert len(state.devices) == 6
+    assert len(state.devices) == 8
     assert len(state.persons) == 3
 
 

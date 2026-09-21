@@ -70,7 +70,10 @@ def test_every_snapshot_field_unity_reads_is_present(state):
 
     for device in snapshot["devices"]:
         assert {"id", "room_id", "type", "name", "online", "state", "version"} <= set(device)
-        assert {"on"} <= set(device["state"])
+        if device["type"] == "sensor":
+            assert {"temperature"} <= set(device["state"])
+        else:
+            assert {"on"} <= set(device["state"])
 
     for person in snapshot["persons"]:
         assert {"id", "display_name", "room_id", "location_known", "version"} <= set(person)
