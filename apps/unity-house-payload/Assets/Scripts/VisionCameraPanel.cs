@@ -1023,7 +1023,28 @@ namespace SmartHome
                 return;
             }
 
-            StartCoroutine(client.StartMonitoring());
+            StartCoroutine(StartMonitoringFromSelections());
+        }
+
+        private IEnumerator StartMonitoringFromSelections()
+        {
+            if (client.TransitionInFlight)
+            {
+                SetStatusError("正在切换摄像头或房间，请等待完成。");
+                yield break;
+            }
+
+            int roomIndex = _roomDropdown == null ? 0 : _roomDropdown.value;
+            string roomId = RoomIdForIndex(roomIndex);
+            if (client.Config == null || client.Config.camera_room_id != roomId)
+            {
+                // Dropdown index 0 is already selected when the panel is built,
+                // so uGUI does not emit onValueChanged for the visible default.
+                // Commit the displayed room before starting monitoring.
+                yield return client.SelectRoom(roomId);
+            }
+
+            yield return client.StartMonitoring();
         }
 
         private void OnMonitorPauseClicked()
