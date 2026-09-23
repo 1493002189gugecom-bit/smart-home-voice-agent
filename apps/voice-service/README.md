@@ -136,6 +136,16 @@ py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r apps/voice-service/requirements.lock.txt
 ```
 
+## Local status API
+
+The normal voice loop also exposes a loopback-only control surface at
+`http://127.0.0.1:8767`. `GET /health`, `/history`, `/events` (SSE), and
+`/devices` let the local perception console show wake state, transcripts,
+assistant replies, tool outcomes, playback state, and safe audio-device names.
+The last 200 public events live only in memory. Raw audio, API keys, model paths,
+and credentials are never returned. Use `--no-control-api` only for isolated
+command-line diagnostics.
+
 ## Choose the TTS voice
 
 ```powershell

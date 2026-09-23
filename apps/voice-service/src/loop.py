@@ -38,6 +38,8 @@ import audio_utils
 import config
 import playback
 import voice_models
+from control_server import create_control_server, start_control_server
+from event_bus import VoiceEventBus
 
 BLOCK_SIZE = 512
 IDLE_TIMEOUT_SECONDS = 20.0
@@ -209,6 +211,9 @@ def main() -> int:
     parser.add_argument("--no-tts", action="store_true", help="print only; useful for diagnostics")
     parser.add_argument("--startup-check", action="store_true", help="validate devices/models, then exit without opening the microphone")
     parser.add_argument("--run-seconds", type=float, default=0.0, help="diagnostic: stop automatically after N seconds")
+    parser.add_argument("--control-host", default="127.0.0.1")
+    parser.add_argument("--control-port", type=int, default=8767)
+    parser.add_argument("--no-control-api", action="store_true")
     parser.add_argument(
         "--agent",
         action="store_true",
@@ -276,6 +281,32 @@ def main() -> int:
 
     args.log_file.parent.mkdir(parents=True, exist_ok=True)
     log_handle = args.log_file.open("a", encoding="utf-8", buffering=1)
+    event_bus = VoiceEventBus(max_events=200)
+    control_server = None
+    if not args.no_control_api:
+        control_server = create_control_server(event_bus, args.control_host, args.control_port)
+        start_control_server(control_server)
+        print(f"voice control API: http://{args.control_host}:{args.control_port}")
+
+    public_event_types = {
+        "ready": "voice_state",
+        "wake": "voice_state",
+        "idle_timeout": "voice_state",
+        "text_session_start": "voice_state",
+        "text_session_end": "voice_state",
+        "agent_end_conversation": "voice_state",
+        "exit_command": "voice_state",
+        "stopped": "voice_state",
+        "asr": "transcript",
+        "agent_reply": "agent_reply",
+        "tool_result": "tool_result",
+        "tts_start": "playback_state",
+        "tts_end": "playback_state",
+        "tts_error": "service_error",
+        "agent_error": "service_error",
+        "voice_error": "service_error",
+        "audio_status": "service_error",
+    }
 
     def log_event(event: str, **fields) -> None:
         record = {
@@ -284,9 +315,17 @@ def main() -> int:
             **fields,
         }
         log_handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        public_type = public_event_types.get(event)
+        if public_type is not None:
+            event_bus.publish(public_type, source_event=event, **fields)
 
     if args.text:
-        return run_text_session(agent, tts, output_target, args, log_event, log_handle)
+        try:
+            return run_text_session(agent, tts, output_target, args, log_event, log_handle)
+        finally:
+            if control_server is not None:
+                control_server.shutdown()
+                control_server.server_close()
 
     audio_queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=128)
     accept_input = True
@@ -435,6 +474,17 @@ def main() -> int:
                                         tools=[result.name for result in agent_reply.tool_results],
                                         seconds=round(time.perf_counter() - agent_started, 3),
                                     )
+                                    for result in agent_reply.tool_results:
+                                        log_event(
+                                            "tool_result",
+                                            state=state,
+                                            name=result.name,
+                                            ok=result.ok,
+                                            error_code=result.error_code,
+                                            message=result.message,
+                                            phrase=result.phrase,
+                                            operation_id=result.operation_id,
+                                        )
                                 except Exception as exc:
                                     # Never let an agent crash kill the voice loop.
                                     reply_text = "语音助手出现异常，请稍后再试。"
@@ -509,6 +559,9 @@ def main() -> int:
         print(f"audio queue overflows: {overflow_count}")
         log_event("stopped", state=state, audio_queue_overflows=overflow_count)
         log_handle.close()
+        if control_server is not None:
+            control_server.shutdown()
+            control_server.server_close()
     return 0
 
 
