@@ -123,6 +123,7 @@ namespace SmartHome
         public string label;
         public int width;
         public int height;
+        public float fps;
 
         public string DisplayLabel
         {
@@ -130,7 +131,13 @@ namespace SmartHome
             {
                 if (!string.IsNullOrEmpty(label))
                 {
-                    return width > 0 && height > 0 ? label + "  " + width + "x" + height : label;
+                    if (width > 0 && height > 0)
+                    {
+                        string frameRate = fps > 0f ? " @ " + fps.ToString("0.#") + "fps" : string.Empty;
+                        return label + "  " + width + "x" + height + frameRate;
+                    }
+
+                    return label;
                 }
 
                 return kind + ":" + source_id;
@@ -489,6 +496,7 @@ namespace SmartHome
                     label = GetString(item, "label", null),
                     width = GetInt(item, "width", 0),
                     height = GetInt(item, "height", 0),
+                    fps = GetFloat(item, "fps", 0f),
                 };
 
                 if (camera.kind == "url")

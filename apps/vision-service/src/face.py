@@ -186,7 +186,16 @@ class FaceEngine:
                 item in {"CUDAExecutionProvider", "TensorrtExecutionProvider"}
                 for item in providers
             ) else -1
-            app.prepare(ctx_id=ctx_id, det_size=_DETECTION_SIZE)
+            # Detect more conservatively than we accept for registration.  The
+            # quality gate below still requires min_detection_confidence, while
+            # this lower detector threshold lets the UI explain a weak face
+            # instead of incorrectly reporting that no face exists at all.
+            detector_threshold = max(0.10, min(0.50, self.min_detection_confidence * 0.60))
+            app.prepare(
+                ctx_id=ctx_id,
+                det_thresh=detector_threshold,
+                det_size=_DETECTION_SIZE,
+            )
         except Exception as exc:
             self._last_message = f"insightface prepare failed: {type(exc).__name__}"
             raise RuntimeError("face_model_prepare_failed") from exc

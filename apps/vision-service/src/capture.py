@@ -13,6 +13,25 @@ from urllib.parse import urlsplit
 from latest import LatestValue
 
 
+_PREFERRED_DEVICE_WIDTH = 1280
+_PREFERRED_DEVICE_HEIGHT = 720
+_PREFERRED_DEVICE_FPS = 30
+
+
+def _configure_device_capture(capture, cv2) -> None:
+    """Request a high-quality low-latency profile and accept device clamping.
+
+    OpenCV cannot enumerate every Windows camera mode portably.  Asking for a
+    common 720p/30 profile lets the backend negotiate the best supported mode
+    instead of silently keeping its usual 640x480 default.
+    """
+
+    capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    capture.set(cv2.CAP_PROP_FRAME_WIDTH, _PREFERRED_DEVICE_WIDTH)
+    capture.set(cv2.CAP_PROP_FRAME_HEIGHT, _PREFERRED_DEVICE_HEIGHT)
+    capture.set(cv2.CAP_PROP_FPS, _PREFERRED_DEVICE_FPS)
+
+
 @dataclass(frozen=True)
 class CameraSource:
     kind: str
@@ -59,11 +78,13 @@ def enumerate_cameras(max_index: int = 8) -> list[dict[str, int | str]]:
         capture = cv2.VideoCapture(index)
         try:
             if capture.isOpened():
+                _configure_device_capture(capture, cv2)
                 found.append({
                     "kind": "device", "device_id": str(index),
                     "label": f"摄像头 {index}",
                     "width": int(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0),
                     "height": int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0),
+                    "fps": round(float(capture.get(cv2.CAP_PROP_FPS) or 0), 2),
                 })
         finally:
             capture.release()
@@ -115,6 +136,8 @@ class CaptureSession:
         import cv2
 
         capture = cv2.VideoCapture(source.source_id)
+        if source.kind == "device" and capture.isOpened():
+            _configure_device_capture(capture, cv2)
         with self._lock:
             if self.session_id != session_id or self._stop.is_set():
                 capture.release()

@@ -40,7 +40,7 @@ namespace SmartHome
         public float reconnectDelaySeconds = 3f;
 
         [Tooltip("Seconds between preview frames while the panel is visible.")]
-        public float previewIntervalSeconds = 0.5f;
+        public float previewIntervalSeconds = 0.1f;
 
         [Tooltip("Per-request timeout in seconds.")]
         public int requestTimeoutSeconds = 5;

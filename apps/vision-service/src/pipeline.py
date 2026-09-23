@@ -494,6 +494,22 @@ class VisionRuntime:
         session = self.registration
         if session is None:
             return
+        session_id = self.capture.session_id
+        # Publish the live frame before face inference.  Registration can spend
+        # noticeable time in the model on its first frame; waiting for it made
+        # Unity replace the previous image with a black/empty transition.
+        preview_jpeg = self._render_preview(frame.frame_bgr, [])
+        with self._lock:
+            if (
+                self.mode != ServiceMode.REGISTERING
+                or self.registration is not session
+                or self.capture.session_id != session_id
+            ):
+                return
+            self._published = _Published(
+                snapshot=self._published.snapshot,
+                preview_jpeg=preview_jpeg,
+            )
         faces = self.faces.analyze(frame.frame_bgr)
         session.accept(frame.frame_bgr, faces, frame.captured_at_ms)
         if session.finished():
@@ -503,11 +519,6 @@ class VisionRuntime:
             self._set_mode(ServiceMode.IDLE)
             self.capture.stop("service_stopping")
             return
-        with self._lock:
-            self._published = _Published(
-                snapshot=self._published.snapshot,
-                preview_jpeg=self._render_preview(frame.frame_bgr, []),
-            )
 
     def _build_observations(
         self,
