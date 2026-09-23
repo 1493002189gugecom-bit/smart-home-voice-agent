@@ -13,8 +13,7 @@ proxies only explicit allow-listed routes to ports 8765–8767.
 
 ## Build the UI
 
-The implementation agent did not install packages or run a build, per the
-project's user-owned verification constraint. When you choose to build it:
+Build the checked-in React source with:
 
 ```powershell
 cd E:\smart-home\apps\perception-console\web
@@ -30,6 +29,10 @@ Then run the gateway from the repository root:
 
 Before `web/dist` exists, `/api/*` remains available while `/` returns an honest
 `frontend_not_built` response instead of a blank or misleading page.
+
+For normal Windows use, run `tools\start-perception.ps1`. It starts only missing
+services, records only the processes it owns, and opens the console in Edge or
+Chrome app mode. Stop those owned processes with `tools\stop-perception.ps1`.
 
 For source UI development, run the gateway on 8770 and `npm run dev`; Vite
 proxies `/api` to the gateway. All services remain loopback-only.
