@@ -72,54 +72,14 @@ A screenshot of that report is the evidence for step 1.
 | `HomeServiceClient.cs` | Loopback HTTP sync (snapshot + increments) and receipts |
 | `SceneStateApplier.cs` | Applies state to primitives; drives the broadcast highlight |
 | `ConnectivityCheck.cs` | Step 1 verification and on-screen report |
-| `VisionContracts.cs` | Vision JSON DTOs, strict readers and the JSON string escaper |
-| `VisionServiceClient.cs` | Non-blocking loopback vision API client (8766) and preview |
-| `VisionOverlayGraphic.cs` | uGUI graphic that draws body boxes and COCO skeletons |
-| `VisionCameraPanel.cs` | Runtime-built camera, monitoring and registration panel |
 | `Tests/StateParserTests.cs` | Unity Test Framework tests using a real payload |
 
-## Vision camera panel (local face and pose vision)
+## Perception controls
 
-The camera panel talks to a second loopback service. `home-service` stays on
-`127.0.0.1:8765`; `vision-service` owns the camera on `127.0.0.1:8766`. Nothing
-in this panel controls Home Assistant devices.
-
-### Attaching it in the editor (no prefabs, no hand-written scenes)
-
-The payload ships **no** `.prefab` or `.unity` file on purpose: those are
-Unity-owned serialized assets, and a hand-written copy is incomplete. Build the
-panel from the editor instead — it takes about a minute:
-
-1. In the scene that already contains your `SceneStateApplier` GameObject, create
-   **one** empty GameObject (for example `VisionCamera`). Put it at the scene
-   root; the panel builds its own UI under it at runtime.
-2. Select it and **Add Component → Vision Camera Panel**. `VisionServiceClient`
-   is added automatically when the panel's `client` field is empty, so one
-   component is enough.
-3. If you prefer an explicit client, first **Add Component → Vision Service
-   Client**, then drag that same GameObject onto the panel's `Client` field. The
-   default `Base Url` is already `http://127.0.0.1:8766`; keep port `8766` and do
-   not change it to the home-service port `8765`.
-4. Leave `Overlay` empty. The panel creates its own Screen Space Overlay `Canvas`
-   (`CanvasScaler` → Scale With Screen Size, 1920x1080, match 0.5) plus a
-   `GraphicRaycaster`. To draw into a canvas you built yourself, set `Overlay` to
-   that canvas's `VisionOverlayGraphic` instead.
-5. Confirm the scene has **exactly one `EventSystem`**. The panel reuses an
-   existing one and only creates one when the scene has none; it logs a warning
-   when it finds duplicates, because two `EventSystem` objects silently break
-   button input.
-6. Press Play. The panel polls by itself; camera, room, monitoring and
-   registration controls are all on the panel and need no extra wiring.
-
-Optional: if you assign `Overlay` yourself, also assign its `Preview` field to
-your preview `RawImage` so the overlay maps camera coordinates through the same
-aspect-fit rectangle the image uses.
-
-### Order of operations
-
-Start `home-service` first (it creates the local vision token), then
-`vision-service`, then Unity. If only Unity runs, the panel reports 未连接 and the
-house shows everyone as 位置未知 — it never invents a room.
+Camera preview, face registration, voice activity and service controls now live
+in the browser-based `perception-console` on `127.0.0.1:8770`. Unity connects
+only to `home-service` on port 8765 and remains a read-only view of person room,
+identity, pose and device state.
 
 ## State semantics the view must respect
 
