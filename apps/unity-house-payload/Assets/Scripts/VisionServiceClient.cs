@@ -815,7 +815,12 @@ namespace SmartHome
                     request.SetRequestHeader("Content-Type", "application/json");
                 }
 
-                request.timeout = requestTimeoutSeconds;
+                // Physical camera discovery opens several Windows device
+                // indices and negotiates their formats.  That can legitimately
+                // take longer than an ordinary loopback JSON request.
+                request.timeout = path == "/cameras"
+                    ? Mathf.Max(requestTimeoutSeconds, 15)
+                    : requestTimeoutSeconds;
                 yield return request.SendWebRequest();
 
                 if (IsFailure(request))
@@ -874,6 +879,13 @@ namespace SmartHome
             {
                 Connected = true;
                 PublishStatus("已连接视觉服务");
+                // A service restart clears the client's camera cache via
+                // SetDisconnected. Re-probe once on reconnection so the user
+                // does not have to press refresh after every restart.
+                if (Cameras.Count == 0 && !_camerasInFlight && isActiveAndEnabled)
+                {
+                    StartCoroutine(FetchCameras());
+                }
             }
         }
 
