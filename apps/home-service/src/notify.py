@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from models import now_ms
 from state import HomeState
 from tools import ToolResult, ToolService
 
@@ -53,19 +54,23 @@ def plan_notification(
 
     plan = NotificationPlan(targets=list(targets))
     by_room: dict[str, dict] = {}
+    # Location is camera-owned now, so the directory alone cannot answer "where".
+    visual = _visual_locations(service)
 
     for name in targets:
         person = state.resolve_person(name)
         if person is None:
             plan.unknown.append({"target": name, "reason": "无法确定是谁"})
             continue
-        if not person.location_known:
+        location = visual.get(person.id) or {}
+        room_id = location.get("room_id")
+        if not room_id or room_id not in state.rooms:
             # Deliberately no fallback to a whole-house broadcast.
             plan.unknown.append(
                 {"target": name, "person_id": person.id, "display_name": person.display_name, "reason": "位置未知"}
             )
             continue
-        room = state.rooms[person.room_id]
+        room = state.rooms[room_id]
         entry = by_room.setdefault(
             room.id,
             {"room_id": room.id, "room_name": room.name, "person_ids": [], "display_names": []},
@@ -120,6 +125,18 @@ def plan_notification(
         operation_id=plan.tasks[0]["task_id"] if plan.tasks else None,
         phrase=plan.phrase,
     )
+
+
+def _visual_locations(service: ToolService) -> dict[str, dict]:
+    """Camera-owned person locations keyed by person id.
+
+    An empty mapping means no observation is available, which must be reported as
+    "location unknown" rather than falling back to a remembered room.
+    """
+    store = getattr(service, "visual_state", None)
+    if store is None:
+        return {}
+    return {item["id"]: item for item in store.snapshot(now_ms())}
 
 
 def _phrase(plan: NotificationPlan) -> str:

@@ -15,6 +15,7 @@ from models import (
     Operation,
     OperationStatus,
     new_id,
+    now_ms,
 )
 from state import HomeState, NotFound, Offline, OutOfRange, StateError, VersionConflict
 
@@ -50,8 +51,11 @@ class ToolResult:
 
 
 class ToolService:
-    def __init__(self, state: HomeState):
+    def __init__(self, state: HomeState, visual_state: Any | None = None):
         self.state = state
+        # Camera-owned person locations. None means no visual store is attached,
+        # so every person must read as location-unknown rather than simulated.
+        self.visual_state = visual_state
         # Counts of device state changes, exposed so tests can prove zero
         # misoperations. Misoperations are writes that should not have happened.
         self.device_writes = 0
@@ -85,7 +89,7 @@ class ToolService:
                     "id": item.id,
                     "name": item.name,
                     "simulated_temp": item.simulated_temp,
-                    "version": item.version,
+                    "version": observed.get("version", item.version),
                     "devices": devices,
                 }
             )
@@ -100,23 +104,40 @@ class ToolService:
                 return ToolResult(False, error=f"无法确定人物：{person}", error_code="not_found")
             people = [resolved]
 
+        # Location is only ever a fresh confirmed camera observation. Without one
+        # the honest answer is "unknown" — never the person's previous room.
+        visual = self._visual_person_index()
         payload = []
         for item in people:
-            room = self.state.rooms.get(item.room_id) if item.room_id else None
+            observed = visual.get(item.id) or {}
+            room_id = observed.get("room_id")
+            room = self.state.rooms.get(room_id) if room_id else None
             payload.append(
                 {
                     "id": item.id,
                     "display_name": item.display_name,
                     "aliases": list(item.aliases),
-                    "room_id": item.room_id,
+                    "room_id": room_id,
                     "room_name": room.name if room else None,
-                    "location_known": item.location_known,
-                    "x": item.x,
-                    "y": item.y,
+                    "location_known": bool(room_id),
+                    "location_source": "camera",
+                    "camera_id": observed.get("camera_id"),
+                    "track_id": observed.get("track_id"),
+                    "pose": observed.get("pose") or "unknown",
+                    "pose_confidence": observed.get("pose_confidence") or 0.0,
+                    "observed_at_ms": observed.get("observed_at_ms"),
+                    "x": observed.get("x"),
+                    "y": observed.get("y"),
                     "version": item.version,
                 }
             )
         return ToolResult(True, data={"persons": payload, "state_version": self.state.version})
+
+    def _visual_person_index(self) -> dict[str, dict[str, Any]]:
+        """Camera-owned person states keyed by person id; empty means unknown."""
+        if self.visual_state is None:
+            return {}
+        return {item["id"]: item for item in self.visual_state.snapshot(now_ms())}
 
     def query_device_status(self, device: str | None = None, room: str | None = None) -> ToolResult:
         if device is not None:

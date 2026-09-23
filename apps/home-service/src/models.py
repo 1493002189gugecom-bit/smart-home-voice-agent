@@ -93,16 +93,27 @@ class Person:
 
 @dataclass
 class VisualObservation:
-    """Camera detection. Deliberately not an identity claim."""
+    """One camera observation of a tracked body.
+
+    Identity here is an observation, not an authentication claim: the vision
+    service compares a locally registered prototype set and reports the result.
+    An unconfirmed, weak, or conflicting match stays ``unknown`` instead of
+    guessing, and a location is only ever published from a confirmed track.
+    """
 
     camera_id: str
+    camera_room_id: str
     track_id: str
     bbox: tuple[float, float, float, float]
-    confidence: float
+    keypoints: tuple[tuple[float, float, float], ...]
+    detection_confidence: float
     observed_at_ms: int
-    # Manual binding only; never inferred from appearance or voice.
-    bound_person_id: str | None = None
-    bound_manually: bool = False
+    person_id: str | None = None
+    face_similarity: float | None = None
+    identity_state: str = "unknown"
+    pose: str = "unknown"
+    pose_confidence: float = 0.0
+    track_state: str = "active"
 
 
 @dataclass

@@ -10,6 +10,7 @@ from typing import Any
 
 from ha_gateway import GatewayError
 from operation_store import Operation, OperationConflict, OperationStore
+from visual_state import route_vision_request
 
 
 DEVICE_IDS = {
@@ -275,6 +276,7 @@ class HAServiceApp:
         database: str | Path,
         *,
         scenes: dict[str, dict[str, Any]] | None = None,
+        visual_state: Any | None = None,
         confirmation_timeout: float = 3.0,
         poll_interval: float = 0.1,
         clock=time.monotonic,
@@ -289,6 +291,9 @@ class HAServiceApp:
         if set(self.catalog) != DEVICE_IDS:
             raise ValueError("HA entity catalog must contain exactly eight devices")
         self.scenes = dict(scenes or {})
+        # Camera-owned person state, shared with the memory backend so both
+        # publish identical person locations.
+        self.visual_state = visual_state
         self.store = OperationStore(database)
         self.confirmation_timeout = float(confirmation_timeout)
         self.poll_interval = float(poll_interval)
@@ -309,7 +314,22 @@ class HAServiceApp:
                 self._device_locks[device_id] = lock
             return lock
 
-    def handle(self, method: str, path: str, query: dict[str, Any], body: dict[str, Any]):
+    def handle(self, method: str, path: str, query: dict[str, Any], body: dict[str, Any],
+               headers: dict[str, str] | None = None):
+        # The camera ingress is resolved before any device route and never reaches
+        # the Home Assistant gateway, so an observation cannot actuate a device.
+        if self.visual_state is not None and path.startswith("/vision/"):
+            vision = route_vision_request(
+                self.visual_state,
+                method,
+                path,
+                body,
+                (headers or {}).get("X-Vision-Token"),
+                now_ms=int(time.time() * 1000),
+            )
+            if vision is not None:
+                return vision
+
         if method == "GET" and path == "/health":
             return 200, {"ok": True, "backend": "ha", "tools": list(CONTROL_TOOLS)}
         if method == "GET" and path == "/catalog":

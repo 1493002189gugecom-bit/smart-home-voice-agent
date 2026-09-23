@@ -6,7 +6,6 @@ from service_paths import CONFIG
 from models import BroadcastState, DeviceType
 from state import (
     HomeState,
-    InvalidRoom,
     NotFound,
     Offline,
     OutOfRange,
@@ -115,11 +114,6 @@ def test_device_type_mismatch_is_rejected(state):
         state.set_light("living_room_ac", on=True)
 
 
-def test_moving_person_requires_a_real_room(state):
-    with pytest.raises(InvalidRoom):
-        state.move_person("dad", "garage")
-
-
 def test_room_temperature_is_independent_of_ac(state):
     room = state.require_room("living_room")
     original = room.simulated_temp
@@ -209,42 +203,6 @@ def test_played_phrase_says_played(state):
 def test_empty_broadcast_text_is_rejected(state):
     with pytest.raises(OutOfRange):
         state.enqueue_broadcast("bedroom", "   ", [])
-
-
-# ------------------------------------------------------------- observation
-def test_track_loss_clears_manual_binding(state):
-    from models import VisualObservation, now_ms
-
-    state.observe(
-        VisualObservation(
-            camera_id="cam0",
-            track_id="track-1",
-            bbox=(0, 0, 1, 1),
-            confidence=0.9,
-            observed_at_ms=now_ms(),
-        )
-    )
-    state.bind_track("track-1", "dad")
-    assert state.observations["track-1"].bound_person_id == "dad"
-    state.lose_track("track-1")
-    assert "track-1" not in state.observations
-
-
-def test_observation_does_not_change_simulated_location(state):
-    from models import VisualObservation, now_ms
-
-    before = state.require_person("dad").room_id
-    state.observe(
-        VisualObservation(
-            camera_id="cam0",
-            track_id="track-2",
-            bbox=(0, 0, 1, 1),
-            confidence=0.99,
-            observed_at_ms=now_ms(),
-        )
-    )
-    state.bind_track("track-2", "dad")
-    assert state.require_person("dad").room_id == before
 
 
 def test_conversation_exit_clears_pending_state(state):

@@ -24,19 +24,76 @@ for _stream in (sys.stdout, sys.stderr):
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "apps" / "home-service" / "src"))
 
-from models import BroadcastState  # noqa: E402,F401
+from models import BroadcastState, now_ms  # noqa: E402,F401
 from notify import plan_notification  # noqa: E402
 from state import build_default_state  # noqa: E402
 from tools import ToolService  # noqa: E402
+from visual_state import VisualStateStore  # noqa: E402
 CONFIG = REPO / "apps" / "home-service" / "config" / "rooms.json"
 
 
 class Demo:
     def __init__(self, emit) -> None:
         self.state = build_default_state(CONFIG if CONFIG.exists() else None)
-        self.tools = ToolService(self.state)
+        # Person locations come from the camera store now: manual movement was
+        # removed, so the demo has to produce locations the way vision does.
+        self.visual = self._build_store()
+        self.tools = ToolService(self.state, visual_state=self.visual)
         self.emit = emit
         self.steps: list[dict] = []
+        self._sessions: dict[str, tuple[str, str]] = {}
+
+    def _build_store(self) -> VisualStateStore:
+        catalog = {
+            person.id: {"display_name": person.display_name, "aliases": list(person.aliases)}
+            for person in self.state.persons.values()
+        }
+        return VisualStateStore(catalog, observation_ttl_ms=600_000)
+
+    def observe_room(self, room_id: str, person_ids: list[str]) -> None:
+        """Publish confirmed observations for one room, exactly like the service."""
+        index = len(self._sessions)
+        camera_id = f"demo-camera-{index}"
+        session_id = f"demo-session-{index}"
+        timestamp = now_ms()
+        self.visual.submit_batch(
+            {
+                "camera_id": camera_id,
+                "camera_room_id": room_id,
+                "session_id": session_id,
+                "observed_at_ms": timestamp,
+                "observations": [
+                    {
+                        "track_id": f"track-{person_id}",
+                        "bbox": [0.4, 0.3, 0.6, 0.9],
+                        "keypoints": [[0.5, 0.4, 0.9], [0.5, 0.7, 0.9]],
+                        "detection_confidence": 0.9,
+                        "person_id": person_id,
+                        "identity_state": "confirmed",
+                        "face_similarity": 0.9,
+                        "pose": "standing",
+                        "pose_confidence": 0.8,
+                        "observed_at_ms": timestamp,
+                        "track_state": "active",
+                    }
+                    for person_id in person_ids
+                ],
+            },
+            timestamp,
+        )
+        self._sessions[room_id] = (camera_id, session_id)
+
+    def withdraw_person(self, person_id: str) -> None:
+        """Drop one track so its person becomes unknown again, as a lost track does."""
+        for camera_id, session_id in self._sessions.values():
+            self.visual.withdraw(
+                {
+                    "camera_id": camera_id,
+                    "session_id": session_id,
+                    "track_ids": [f"track-{person_id}"],
+                },
+                now_ms(),
+            )
 
     def record(self, title: str, result) -> None:
         entry = {
@@ -54,6 +111,7 @@ class Demo:
         self.emit_section("1. 查询当前状态")
         self.record("查询客厅状态", self.tools.query_room_status("客厅"))
         self.record("查询人物位置（爸爸）", self.tools.query_person_location("爸爸"))
+        self.emit_note("尚未有摄像头观察，人物位置按设计应为未知（不是记住的房间）")
 
         self.emit_section("2. 开灯（明确指令）")
         self.record("打开客厅的灯", self.tools.set_light(room="客厅", on=True))
@@ -80,13 +138,18 @@ class Demo:
         )
 
         self.emit_section("6. 多目标通知：同房间合并 / 跨房间串行")
-        self.state.move_person("dad", "kitchen")
+        # Locations are camera observations now: kitchen sees dad and mom, the
+        # living room sees the child.
+        self.observe_room("kitchen", ["dad", "mom"])
+        self.observe_room("living_room", ["child"])
         plan = plan_notification(self.tools, ["爸爸", "妈妈", "孩子"], "吃饭啦")
         self.record("叫爸爸、妈妈和孩子吃饭", plan)
         self.emit_note(f"队列长度：{len(self.state.broadcast_queue)}（同房间已合并）")
 
         self.emit_section("7. 位置未知不自动全屋广播")
-        self.state.require_person("child").room_id = None
+        # Withdrawing the child's track is how a lost track clears a location, so
+        # this proves the unknown branch without any manual position handling.
+        self.withdraw_person("child")
         plan2 = plan_notification(self.tools, ["孩子"], "吃饭啦")
         self.record("只叫位置未知的孩子", plan2)
         queues_before = len(self.state.broadcast_queue)

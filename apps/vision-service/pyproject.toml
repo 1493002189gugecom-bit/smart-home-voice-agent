@@ -1,0 +1,13 @@
+[project]
+name = "smart-home-vision-service"
+version = "0.1.0"
+description = "Loopback-only local face, pose, and room observation service"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+  "insightface>=2.0,<3",
+  "numpy>=2.4,<3",
+  # 1.27+ Windows wheels target CUDA 13; this project documents CUDA 12.8.
+  "onnxruntime-gpu>=1.23,<1.27",
+  "opencv-python>=4.13,<5",
+  "ultralytics>=8.4.63,<9",
+]

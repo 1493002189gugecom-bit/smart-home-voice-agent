@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from service_paths import CONFIG
+from vision_fixtures import service_with_vision
 from models import BroadcastState, OperationStatus
 from notify import plan_notification
 from state import build_default_state
@@ -45,16 +46,19 @@ def test_query_unknown_room_fails(service):
     assert result.error_code == "not_found"
 
 
-def test_query_person_location_reports_known(service):
+def test_query_person_location_reports_known():
+    """A room exists only because a camera observation put the person there."""
+    service = service_with_vision({"bedroom": ["dad"]})
     result = service.query_person_location("爸爸")
     assert result.ok
     person = result.data["persons"][0]
     assert person["room_name"] == "卧室"
     assert person["location_known"] is True
+    assert person["location_source"] == "camera"
 
 
 def test_query_person_location_reports_unknown(service):
-    service.state.require_person("dad").room_id = None
+    # No visual store means no observation, so the honest answer is unknown.
     result = service.query_person_location("爸爸")
     assert result.ok
     assert result.data["persons"][0]["location_known"] is False
@@ -204,8 +208,9 @@ def test_empty_broadcast_text_fails(service):
 
 
 # ------------------------------------------------- notification planning
-def test_two_aliases_of_the_same_person_merge_into_one_task(service):
+def test_two_aliases_of_the_same_person_merge_into_one_task():
     # 爸爸 and 老爸 are aliases for the same person, so only one task is queued.
+    service = service_with_vision({"bedroom": ["dad"]})
     result = plan_notification(service, ["爸爸", "老爸"], "吃饭啦")
     assert result.ok
     plan = result.data
@@ -215,7 +220,8 @@ def test_two_aliases_of_the_same_person_merge_into_one_task(service):
     assert plan["merged"]
 
 
-def test_cross_room_targets_create_serial_tasks(service):
+def test_cross_room_targets_create_serial_tasks():
+    service = service_with_vision({"bedroom": ["dad"], "living_room": ["child"]})
     result = plan_notification(service, ["爸爸", "孩子"], "吃饭啦")
     assert result.ok
     plan = result.data
@@ -225,7 +231,7 @@ def test_cross_room_targets_create_serial_tasks(service):
 
 
 def test_unknown_location_is_reported_and_not_broadcast(service):
-    service.state.require_person("dad").room_id = None
+    # Without a camera observation the person has no room at all.
     result = plan_notification(service, ["爸爸"], "吃饭啦")
     assert result.ok
     plan = result.data
@@ -236,8 +242,9 @@ def test_unknown_location_is_reported_and_not_broadcast(service):
     assert service.state.broadcast_queue == []
 
 
-def test_partial_unknown_still_notifies_known_targets(service):
-    service.state.require_person("dad").room_id = None
+def test_partial_unknown_still_notifies_known_targets():
+    # Only the child is observed, so only the child can be notified.
+    service = service_with_vision({"living_room": ["child"]})
     result = plan_notification(service, ["爸爸", "孩子"], "吃饭啦")
     assert result.ok
     plan = result.data
@@ -247,7 +254,8 @@ def test_partial_unknown_still_notifies_known_targets(service):
     assert plan["needs_clarification"] is True
 
 
-def test_phrase_never_claims_hearing_or_arrival(service):
+def test_phrase_never_claims_hearing_or_arrival():
+    service = service_with_vision({"bedroom": ["dad"], "living_room": ["child"]})
     result = plan_notification(service, ["爸爸", "孩子"], "吃饭啦")
     phrase = result.phrase
     for forbidden in ("听到了", "来了", "已播报"):
@@ -256,13 +264,13 @@ def test_phrase_never_claims_hearing_or_arrival(service):
 
 
 def test_unknown_phrase_asks_instead_of_broadcasting(service):
-    service.state.require_person("dad").room_id = None
     result = plan_notification(service, ["爸爸"], "吃饭啦")
     assert "未通知" in result.phrase
     assert "全屋播报" in result.phrase
 
 
-def test_duplicate_target_names_merge(service):
+def test_duplicate_target_names_merge():
+    service = service_with_vision({"living_room": ["child"]})
     result = plan_notification(service, ["孩子", "小朋友"], "吃饭啦")
     assert result.ok
     plan = result.data
@@ -271,9 +279,9 @@ def test_duplicate_target_names_merge(service):
     assert plan["merged"]
 
 
-def test_same_room_different_people_merge(service):
+def test_same_room_different_people_merge():
     """Two distinct people in one room share a single announcement."""
-    service.state.move_person("dad", "kitchen")
+    service = service_with_vision({"kitchen": ["dad", "mom"]})
     result = plan_notification(service, ["爸爸", "妈妈"], "吃饭啦")
     assert result.ok
     plan = result.data

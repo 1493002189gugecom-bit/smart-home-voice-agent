@@ -31,6 +31,77 @@ namespace SmartHome
         public float x;
         public float y;
         public int version;
+
+        /// <summary>
+        /// Where this position came from. The design fixes it to "camera" for the
+        /// visual pipeline, so anything else is shown as an unverified source
+        /// rather than silently treated as a camera observation.
+        /// </summary>
+        public string location_source;
+
+        /// <summary>Camera that produced the observation, e.g. "device:0".</summary>
+        public string camera_id;
+
+        /// <summary>Opaque per-session track id that owns the observation.</summary>
+        public string track_id;
+
+        /// <summary>
+        /// Pose reported by the vision service. Normalized to "unknown" when
+        /// absent or unrecognized, so the house label never shows a bare English
+        /// code or a value left over from another contract version.
+        /// </summary>
+        public string pose = "unknown";
+
+        /// <summary>Confidence of <see cref="pose"/>; 0 when the service sent null.</summary>
+        public float pose_confidence;
+
+        /// <summary>
+        /// Service clock of the observation in milliseconds. This is the service's
+        /// observation time, not a local timestamp, so it is never compared with
+        /// Unity's own clock here.
+        /// </summary>
+        public long observed_at_ms;
+
+        public bool HasCameraLocation
+        {
+            get
+            {
+                return location_known &&
+                       location_source == "camera" &&
+                       !string.IsNullOrEmpty(room_id) &&
+                       !string.IsNullOrEmpty(camera_id) &&
+                       !string.IsNullOrEmpty(track_id);
+            }
+        }
+
+        /// <summary>True when the snapshot claims the position came from a camera.</summary>
+        public bool LocationFromCamera
+        {
+            get { return location_source == "camera"; }
+        }
+
+        /// <summary>
+        /// Chinese pose text for the house label.
+        ///
+        /// Duplicated from the vision contract for the same reason as the pose
+        /// normalization above: this file must stay compilable on its own for the
+        /// offline parser check.
+        /// </summary>
+        public string PoseLabel
+        {
+            get
+            {
+                switch (pose)
+                {
+                    case "standing": return "站立";
+                    case "sitting": return "坐下";
+                    case "lying": return "躺下";
+                    case "suspected_fall": return "疑似跌倒";
+                    case "hand_raised": return "举手";
+                    default: return "未知姿态";
+                }
+            }
+        }
     }
 
     [Serializable]
@@ -240,7 +311,42 @@ namespace SmartHome
                 x = ReadFloat(map, "x"),
                 y = ReadFloat(map, "y"),
                 version = ReadInt(map, "version"),
+                // Camera provenance is read as-is and never inferred: a snapshot
+                // without these fields is an older contract, and the applier
+                // treats it as "source unknown" instead of "from the camera".
+                location_source = ReadString(map, "location_source", null),
+                camera_id = ReadString(map, "camera_id", null),
+                track_id = ReadString(map, "track_id", null),
+                pose = ReadPose(map, "pose"),
+                pose_confidence = ReadFloat(map, "pose_confidence"),
+                observed_at_ms = ReadLong(map, "observed_at_ms"),
             };
+        }
+
+        /// <summary>
+        /// Reads a pose string, mapping anything unrecognized to "unknown".
+        ///
+        /// The normalization is duplicated from the vision contract on purpose:
+        /// this parser is also compiled on its own by the offline
+        /// <c>tools/unity-check</c> project, so it must not depend on the vision
+        /// client's files. An unknown pose stays visible as 未知姿态 instead of
+        /// being presented as a real state.
+        /// </summary>
+        private static string ReadPose(Dictionary<string, object> map, string key)
+        {
+            string value = ReadString(map, key, null);
+            switch (value)
+            {
+                case "standing":
+                case "sitting":
+                case "lying":
+                case "suspected_fall":
+                case "hand_raised":
+                case "unknown":
+                    return value;
+                default:
+                    return "unknown";
+            }
         }
 
         private static BroadcastDto ReadBroadcast(Dictionary<string, object> map)
@@ -318,6 +424,36 @@ namespace SmartHome
             }
 
             return 0f;
+        }
+
+        /// <summary>
+        /// Reads a millisecond timestamp.
+        ///
+        /// Kept as a long and parsed invariant because the service sends epoch
+        /// milliseconds, which exceed single-precision float range; routing them
+        /// through <see cref="ReadFloat"/> would silently corrupt the value.
+        /// </summary>
+        private static long ReadLong(Dictionary<string, object> map, string key)
+        {
+            object value;
+            if (map.TryGetValue(key, out value) && value != null)
+            {
+                long parsed;
+                if (long.TryParse(value.ToString(), System.Globalization.NumberStyles.Integer,
+                        System.Globalization.CultureInfo.InvariantCulture, out parsed))
+                {
+                    return parsed;
+                }
+
+                double fallback;
+                if (double.TryParse(value.ToString(), System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out fallback))
+                {
+                    return (long)fallback;
+                }
+            }
+
+            return 0L;
         }
 
         private static bool ReadBool(Dictionary<string, object> map, string key, bool fallback)

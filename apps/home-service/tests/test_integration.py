@@ -5,6 +5,7 @@ import json
 import pytest
 
 from service_paths import CONFIG
+from vision_fixtures import app_with_vision
 from models import BroadcastState
 from notify import plan_notification
 from server import HomeServiceApp
@@ -14,7 +15,9 @@ from tools import ToolService
 
 @pytest.fixture()
 def app() -> HomeServiceApp:
-    return HomeServiceApp(build_default_state(CONFIG))
+    # Person locations come from the camera store now, so the fixture places the
+    # father and the child exactly the way a camera observation would.
+    return app_with_vision({"bedroom": ["dad"], "living_room": ["child"]})
 
 
 def get(app: HomeServiceApp, path: str, **query):
@@ -128,8 +131,10 @@ def test_duplicate_request_via_http_is_applied_once(app):
     assert app.state.require_device("living_room_light").version == version_after_first
 
 
-def test_partial_success_when_one_target_location_unknown(app):
-    post(app, "/test/person_location_unknown", {"person_id": "dad"})
+def test_partial_success_when_one_target_location_unknown():
+    # Only the child is observed, so the father must be reported as unknown
+    # rather than placed in a remembered room.
+    app = app_with_vision({"living_room": ["child"]})
     status, payload = post(app, "/tool/notify", {"targets": ["爸爸", "孩子"], "text": "吃饭啦"})
     assert status == 200
     plan = payload["data"]

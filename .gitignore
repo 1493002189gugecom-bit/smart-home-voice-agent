@@ -47,6 +47,12 @@
 !/apps/home-service/requirements.lock.txt
 !/apps/home-service/pyproject.toml
 !/apps/home-service/README.md
+!/apps/vision-service/
+!/apps/vision-service/*
+!/apps/vision-service/src/
+!/apps/vision-service/config/
+!/apps/vision-service/pyproject.toml
+!/apps/vision-service/README.md
 !/apps/device-simulator/
 /apps/device-simulator/*
 !/apps/device-simulator/src/

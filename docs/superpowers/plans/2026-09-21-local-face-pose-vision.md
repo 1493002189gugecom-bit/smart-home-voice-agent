@@ -514,3 +514,49 @@ Run only `git status --short`, `git diff --check`, and targeted `rg` searches fo
 - [ ] **Step 6: Report exact completion state**
 
 List changed files and any unresolved dependency/model/license/manual-setup needs. Use the phrase “已实现，尚未验证” and explicitly enumerate every prohibited verification category as not run.
+
+---
+
+## 复核状态（2026-09-21，静态复核轮）
+
+Task 1–8 末尾的「Perform static review only」已逐条执行：只读代码、`git status --short`、`git diff --check`、文本搜索。**未运行**任何测试、编译、模块导入、模型推理、摄像头采集、服务启动或截图验收，因此本文件中的实现步骤仍未经过运行验证。
+
+| 复核步骤 | 结果 |
+| --- | --- |
+| Task 1 Step 6 | 通过；发现计划 Step 2 与 Step 3 自相矛盾（见下） |
+| Task 2 Step 5 | 通过（四处 `VideoCapture` 均配对释放） |
+| Task 3 Step 6 | **发现 2 个缺陷（A、B）** |
+| Task 4 Step 7 | 错误路径齐全；**发现缺陷 D** |
+| Task 5 Step 7 | **发现缺陷 E** |
+| Task 6 Step 7 | 校验早于变更、过期/撤销/离线上溯两函数均通过；**发现缺陷 C** |
+| Task 7 Step 6 | 通过（请求释放、纹理替换/销毁、失败清预览、JSON 转义均在位） |
+| Task 8 Step 7 | 通过（唯一 EventSystem、raycast 关闭、监听齐全、尺寸非零、池化销毁） |
+| Task 9 Step 5 | 通过（8 项审计全部执行） |
+
+### 复核发现的 5 个缺陷（已按用户授权修复，仍未经运行验证）
+
+- **A** `pose.py` `_select`：举手在站立/坐下/躺下成立时永不报告，与设计 §6 和验收第 4 条冲突。
+- **B** `pose.py` `lying_by_shape`：无可用关键点时仍可凭检测框宽高比判为躺下，`available_ratio` 计算后未使用；与设计 §6「关键点不足 → 未知」冲突。
+- **C** `home-service/src/server.py` `after_request`：只对 memory 后端发布快照，HA 后端下成功的 `/vision/*` 变更不会立即推送，与 Task 6 Step 6 冲突；修复前需先决定限流策略。
+- **D** `pipeline.py` `_on_capture_status`：摄像头中断时未取消注册会话，`/registration` 持续返回中断前的进度，与设计 §11 冲突。
+- **E** `pipeline.py` `select_room`：无条件停止采集却不同步模式，导致「monitoring 但无帧、残留上一批 tracks」；计划 Step 3 要求切换后监控继续有效。
+
+执行约束与静态复核记录保存在 Git 忽略的
+`.superpowers/sdd/2026-09-21-local-face-pose-vision/progress.md`。
+
+### 最终契约复核追加修复（同样未经运行验证）
+
+- 空观察批次现在会替换该摄像头的上一帧轨迹，人物离开画面后不会只靠 TTL 清除。
+- observation 上传、offline/withdraw 使用代际屏障串行化，旧会话的排队帧不能在离线消息后回流。
+- InsightFace providers 改在 `FaceAnalysis` 构造时传入，配置的 CUDA/CPU 顺序不再被忽略。
+- 注册响应补齐 `active`，确认阶段不再被提前当作完成，最终状态保留给 Unity 轮询读取。
+- 注册帧只执行一次人脸分析；注册状态步骤改为面向 UI 的 1–6 编号。
+- 单人注册库没有 runner-up 时允许通过 margin 门槛；阈值统一由加载的配置决定。
+- DPAPI 输出改用 `ctypes.string_at` 复制并用 64 位安全的 `LocalFree` 释放。
+- Unity bbox 与 Python 统一为 `[x1,y1,x2,y2]`；摄像头枚举从每秒探测改为启动一次和手动刷新。
+- `/config`、`/cameras`、`/registration` 的服务响应与 Unity 解析结构已对齐。
+- Unity home 客户端改读 Memory/HA 共用的规范化完整快照，使视觉位置和过期状态持续更新。
+
+### 未勾选说明
+
+上面的复选框保持未勾选状态：复核只确认了「代码与设计/计划不一致」这类静态事实，未确认任何运行行为。上述缺陷与追加契约问题已按用户授权修复，但**修复本身同样没有运行验证**——没有测试、编译、导入、推理、摄像头、服务或截图。因此这些实现步骤要等真机验收通过后才应标记完成。

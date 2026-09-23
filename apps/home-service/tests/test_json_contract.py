@@ -26,10 +26,13 @@ def test_person_payload_includes_location_known(state):
 
 
 def test_person_payload_marks_unknown_location_explicitly(state):
-    state.require_person("dad").room_id = None
+    # No camera has observed anyone, so every person must read as unknown rather
+    # than falling back to a configured or remembered room.
     payload = state.snapshot()["persons"]
     dad = next(p for p in payload if p["id"] == "dad")
     assert dad["location_known"] is False
+    assert dad["room_id"] is None
+    assert dad["location_source"] == "camera"
 
 
 def test_broadcast_payload_includes_room_name(state):

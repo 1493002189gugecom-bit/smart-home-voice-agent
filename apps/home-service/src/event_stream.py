@@ -63,23 +63,38 @@ def encode_sse(item: StreamEvent) -> bytes:
 
 
 def canonical_memory_snapshot(
-    payload: dict[str, Any], *, sequence: int, generated_at_ms: int
+    payload: dict[str, Any],
+    *,
+    sequence: int,
+    generated_at_ms: int,
+    persons: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    """Canonical memory snapshot, optionally overridden by camera-owned persons.
+
+    When ``persons`` is supplied it replaces the in-memory list entirely: the
+    memory backend no longer owns a person location, so falling back to its
+    historical values would republish a room that nobody observed.
+    """
     return {
         "version": int(sequence),
         "backend": "memory",
         "generated_at_ms": int(generated_at_ms),
         "rooms": deepcopy(payload.get("rooms") or []),
         "devices": deepcopy(payload.get("devices") or []),
-        "persons": deepcopy(payload.get("persons") or []),
+        "persons": deepcopy(persons) if persons is not None else deepcopy(payload.get("persons") or []),
         "broadcasts": deepcopy(payload.get("broadcasts") or []),
         "broadcast_queue": deepcopy(payload.get("broadcast_queue") or []),
     }
 
 
 def canonical_ha_snapshot(
-    payload: dict[str, Any], *, sequence: int, generated_at_ms: int
+    payload: dict[str, Any],
+    *,
+    sequence: int,
+    generated_at_ms: int,
+    persons: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    """Canonical HA snapshot. Home Assistant never supplies person positions."""
     data = payload.get("data") if isinstance(payload, dict) else None
     rooms_source = data.get("rooms") if isinstance(data, dict) else None
     if payload.get("ok") is not True or not isinstance(rooms_source, list):
@@ -114,7 +129,7 @@ def canonical_ha_snapshot(
         "generated_at_ms": int(generated_at_ms),
         "rooms": rooms,
         "devices": devices,
-        "persons": [],
+        "persons": deepcopy(persons) if persons is not None else [],
         "broadcasts": [],
         "broadcast_queue": [],
     }

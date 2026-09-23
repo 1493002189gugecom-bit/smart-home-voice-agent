@@ -26,7 +26,7 @@ namespace SmartHome
         public event Action<string> StatusChanged;
         public event Action<string> ErrorOccurred;
 
-        /// <summary>Last committed state version this client has applied.</summary>
+        /// <summary>Last canonical snapshot version this client has applied.</summary>
         public int AppliedVersion { get; private set; } = -1;
 
         public bool Connected { get; private set; }
@@ -56,10 +56,10 @@ namespace SmartHome
 
         private IEnumerator PollLoop()
         {
-            // The first request is always a full snapshot; afterwards we ask for
-            // increments since the version we already applied. If the service
-            // cannot serve that version it answers with a fresh snapshot, which
-            // is why the same code path handles both modes.
+            // Person positions are camera observations with their own expiry and
+            // do not mutate the legacy HomeState increment counter. Poll the
+            // canonical full snapshot so device and visual state always advance
+            // together on both memory and Home Assistant backends.
             while (true)
             {
                 yield return SyncOnce();
@@ -69,7 +69,7 @@ namespace SmartHome
 
         private IEnumerator SyncOnce()
         {
-            string path = AppliedVersion < 0 ? "/snapshot" : "/state?since=" + AppliedVersion;
+            const string path = "/snapshot";
             using (UnityWebRequest request = UnityWebRequest.Get(baseUrl + path))
             {
                 request.timeout = 5;

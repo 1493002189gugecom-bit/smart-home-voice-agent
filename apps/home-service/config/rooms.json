@@ -72,19 +72,19 @@
       "id": "dad",
       "display_name": "爸爸",
       "aliases": ["父亲", "老爸"],
-      "room_id": "bedroom"
+      "room_id": null
     },
     {
       "id": "mom",
       "display_name": "妈妈",
       "aliases": ["母亲", "老妈"],
-      "room_id": "kitchen"
+      "room_id": null
     },
     {
       "id": "child",
       "display_name": "孩子",
       "aliases": ["小朋友", "宝宝"],
-      "room_id": "living_room"
+      "room_id": null
     }
   ]
 }

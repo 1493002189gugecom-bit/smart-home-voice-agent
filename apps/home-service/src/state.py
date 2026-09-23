@@ -23,7 +23,6 @@ from models import (
     OperationStatus,
     Person,
     Room,
-    VisualObservation,
     new_id,
     now_ms,
 )
@@ -79,6 +78,15 @@ def _person_to_dict(person: Person) -> dict[str, Any]:
     # Agent both need it explicitly: "no position" must be visible, never
     # inferred from a missing field.
     data["location_known"] = person.location_known
+    # The person directory no longer owns a position: the camera store does.
+    # These keys keep the payload shape stable for existing readers, and they
+    # always describe a camera-sourced state so the source can never be misread.
+    data["location_source"] = "camera"
+    data["camera_id"] = None
+    data["track_id"] = None
+    data["pose"] = "unknown"
+    data["pose_confidence"] = 0.0
+    data["observed_at_ms"] = None
     return data
 
 
@@ -108,7 +116,6 @@ class HomeState:
         self.rooms: dict[str, Room] = {}
         self.devices: dict[str, Device] = {}
         self.persons: dict[str, Person] = {}
-        self.observations: dict[str, VisualObservation] = {}
         self.conversations: dict[str, Conversation] = {}
         self.operations: dict[str, Operation] = {}
         self.broadcast_queue: list[str] = []
@@ -405,59 +412,6 @@ class HomeState:
         )
         return room
 
-    def move_person(self, person_id: str, room_id: str, x: float | None = None, y: float | None = None) -> Person:
-        person = self.require_person(person_id)
-        if room_id not in self.rooms:
-            raise InvalidRoom(f"unknown room: {room_id}")
-        # Manual simulation is authoritative; camera observations never write here.
-        person.room_id = room_id
-        person.x = x
-        person.y = y
-        person.version += 1
-        self._commit(
-            "person_moved",
-            {"person_id": person_id, "room_id": room_id, "x": x, "y": y, "version": person.version},
-        )
-        return person
-
-    # ------------------------------------------------------ observations
-    def observe(self, observation: VisualObservation) -> VisualObservation:
-        self.observations[observation.track_id] = observation
-        self._commit(
-            "observation",
-            {
-                "camera_id": observation.camera_id,
-                "track_id": observation.track_id,
-                "confidence": observation.confidence,
-            },
-        )
-        return observation
-
-    def bind_track(self, track_id: str, person_id: str) -> VisualObservation:
-        observation = self.observations.get(track_id)
-        if observation is None:
-            raise NotFound(f"unknown track: {track_id}")
-        self.require_person(person_id)
-        observation.bound_person_id = person_id
-        observation.bound_manually = True
-        self._commit("track_bound", {"track_id": track_id, "person_id": person_id})
-        return observation
-
-    def unbind_track(self, track_id: str) -> VisualObservation:
-        observation = self.observations.get(track_id)
-        if observation is None:
-            raise NotFound(f"unknown track: {track_id}")
-        observation.bound_person_id = None
-        observation.bound_manually = False
-        self._commit("track_unbound", {"track_id": track_id})
-        return observation
-
-    def lose_track(self, track_id: str) -> None:
-        """Track loss clears any manual binding; reappearance is not the same person."""
-        if track_id in self.observations:
-            del self.observations[track_id]
-            self._commit("track_lost", {"track_id": track_id})
-
     # ------------------------------------------------------ conversations
     def create_conversation(
         self, test_speaker: str | None, source_room_id: str | None
@@ -660,9 +614,11 @@ def build_default_state(config_path: Path | None = None) -> HomeState:
     persons = cfg.get("persons")
     if not persons:
         persons = [
-            {"id": "dad", "display_name": "爸爸", "aliases": ["父亲", "老爸"], "room_id": "bedroom"},
-            {"id": "mom", "display_name": "妈妈", "aliases": ["母亲", "老妈"], "room_id": "kitchen"},
-            {"id": "child", "display_name": "孩子", "aliases": ["小朋友", "宝宝"], "room_id": "living_room"},
+            # No default room: a person's location is only ever what the camera
+            # observes, so a stopped vision service must read as unknown.
+            {"id": "dad", "display_name": "爸爸", "aliases": ["父亲", "老爸"], "room_id": None},
+            {"id": "mom", "display_name": "妈妈", "aliases": ["母亲", "老妈"], "room_id": None},
+            {"id": "child", "display_name": "孩子", "aliases": ["小朋友", "宝宝"], "room_id": None},
         ]
     for person in persons:
         state.add_person(

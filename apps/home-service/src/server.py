@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -24,10 +25,15 @@ from event_stream import (
     canonical_memory_snapshot,
     encode_sse,
 )
-from models import VisualObservation, now_ms
+from models import now_ms
 from notify import plan_notification
 from state import HomeState, StateError, build_default_state
 from tools import TOOL_NAMES, ToolService
+from visual_state import (
+    DEFAULT_OBSERVATION_TTL_MS,
+    VisualStateStore,
+    route_vision_request,
+)
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
@@ -35,6 +41,12 @@ DEFAULT_PORT = 8765
 # Only these two variables may be read from the local env file. The file is
 # git-ignored and is never logged or echoed back.
 ENV_FILE_KEYS = frozenset({"HOME_ASSISTANT_URL", "HOME_ASSISTANT_TOKEN"})
+
+# A camera observation must reach SSE clients promptly on both backends. An HA
+# snapshot reads every catalogued entity, so a burst of observation batches is
+# coalesced into at most one publish per interval; a trailing publish guarantees
+# the newest batch is still delivered.
+VISION_PUBLISH_MIN_INTERVAL_SECONDS = 1.0
 
 
 def default_config_path() -> Path:
@@ -77,6 +89,46 @@ def required_value(values: dict[str, str], name: str) -> str:
     return value
 
 
+def default_person_catalog() -> dict[str, dict[str, Any]]:
+    """Person directory for the HA backend, which has no in-memory state.
+
+    Home Assistant owns the devices, so the person names and aliases still come
+    from rooms.json — the same file the memory backend reads — or the two
+    backends would disagree about who exists.
+    """
+    try:
+        payload = json.loads(default_config_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        payload = {}
+    catalog: dict[str, dict[str, Any]] = {}
+    for person in payload.get("persons") or []:
+        if not isinstance(person, dict) or not person.get("id"):
+            continue
+        catalog[str(person["id"])] = {
+            "display_name": str(person.get("display_name") or person["id"]),
+            "aliases": [str(item) for item in person.get("aliases") or []],
+        }
+    return catalog or {
+        "dad": {"display_name": "爸爸", "aliases": ["父亲", "老爸"]},
+        "mom": {"display_name": "妈妈", "aliases": ["母亲", "老妈"]},
+        "child": {"display_name": "孩子", "aliases": ["小朋友", "宝宝"]},
+    }
+
+
+def build_visual_state(catalog: dict[str, dict[str, Any]]) -> VisualStateStore:
+    """Create the single camera-owned person store for the active backend."""
+    store = VisualStateStore(catalog, observation_ttl_ms=DEFAULT_OBSERVATION_TTL_MS)
+    store.ensure_token()
+    return store
+
+
+def build_visual_state_from_state(state: HomeState) -> VisualStateStore:
+    return build_visual_state({
+        person.id: {"display_name": person.display_name, "aliases": list(person.aliases)}
+        for person in state.persons.values()
+    })
+
+
 def build_app_from_environment(config: Path | None = None):
     """Select exactly one backend. There is no silent fallback.
 
@@ -88,7 +140,8 @@ def build_app_from_environment(config: Path | None = None):
     backend = values.get("HOME_SERVICE_BACKEND", "memory")
     if backend == "memory":
         path = default_config_path() if config is None else config
-        return HomeServiceApp(build_default_state(path if path.exists() else None))
+        state = build_default_state(path if path.exists() else None)
+        return HomeServiceApp(state, visual_state=build_visual_state_from_state(state))
     if backend != "ha":
         raise SystemExit("HOME_SERVICE_BACKEND must be memory or ha")
 
@@ -103,7 +156,10 @@ def build_app_from_environment(config: Path | None = None):
     # Scenes are validated against the catalog at startup, so a broken scene file
     # cannot wait until a user says "我出门了" to fail.
     scenes = load_scenes(scenes_path, catalog) if scenes_path.exists() else {}
-    app = HAServiceApp(gateway, catalog, database, scenes=scenes)
+    app = HAServiceApp(
+        gateway, catalog, database, scenes=scenes,
+        visual_state=build_visual_state(default_person_catalog()),
+    )
     # Crash recovery must finish before the service accepts requests, so no
     # caller can observe a half-resolved operation.
     app.reconcile_unfinished()
@@ -119,15 +175,46 @@ def _int_or_none(value: Any) -> int | None:
 class HomeServiceApp:
     """Transport-independent request handling, so it can be unit tested."""
 
-    def __init__(self, state: HomeState):
+    def __init__(self, state: HomeState, visual_state: VisualStateStore | None = None):
         self.state = state
-        self.tools = ToolService(state)
+        # One camera-owned person store is shared by both backends, so switching
+        # backend can never change where a person is shown.
+        self.visual_state = visual_state
+        self.tools = ToolService(state, visual_state=visual_state)
+
+    def visual_persons(self) -> list[dict[str, Any]] | None:
+        """Current camera-sourced persons, or None when no store is attached."""
+        if self.visual_state is None:
+            return None
+        return self.visual_state.snapshot(now_ms())
+
+    def _snapshot_with_visual_persons(self) -> dict[str, Any]:
+        payload = self.state.snapshot()
+        persons = self.visual_persons()
+        if persons is not None:
+            payload["persons"] = persons
+        return payload
 
     # ------------------------------------------------------------- routing
-    def handle(self, method: str, path: str, query: dict[str, list[str]], body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    def handle(self, method: str, path: str, query: dict[str, list[str]], body: dict[str, Any],
+               headers: dict[str, str] | None = None) -> tuple[int, dict[str, Any]]:
         def first(name: str) -> str | None:
             values = query.get(name)
             return values[0] if values else None
+
+        # Vision ingress is resolved before any device route and never reaches
+        # ToolService, so a camera observation can never actuate a device.
+        if self.visual_state is not None and path.startswith("/vision/"):
+            vision = route_vision_request(
+                self.visual_state,
+                method,
+                path,
+                body,
+                (headers or {}).get("X-Vision-Token"),
+                now_ms=now_ms(),
+            )
+            if vision is not None:
+                return vision
 
         if method == "GET" and path == "/health":
             return 200, {"ok": True, "version": self.state.version, "tools": list(TOOL_NAMES)}
@@ -137,7 +224,7 @@ class HomeServiceApp:
             return 200, self.state.sync(_int_or_none(since))
 
         if method == "GET" and path == "/snapshot":
-            return 200, self.state.snapshot()
+            return 200, self._snapshot_with_visual_persons()
 
         if method == "GET" and path == "/broadcast/head":
             task = self.state.head_broadcast()
@@ -216,19 +303,9 @@ class HomeServiceApp:
             result = self.tools.query_device_status(first("device"), first("room"))
             return (200 if result.ok else 400), result.to_dict()
 
-        # Test-panel style mutations used by the dashboard and tests.
-        if method == "POST" and path == "/test/move_person":
-            try:
-                person = self.state.move_person(
-                    str(body.get("person_id", "")),
-                    str(body.get("room_id", "")),
-                    body.get("x"),
-                    body.get("y"),
-                )
-            except StateError as exc:
-                return 400, {"ok": False, "error": exc.message, "code": exc.code}
-            return 200, {"ok": True, "person_id": person.id, "room_id": person.room_id}
-
+        # Test-panel style mutations used by the dashboard and tests. Person
+        # position is deliberately absent: only the camera store may place a
+        # person, so there is no manual move or track-binding route left.
         if method == "POST" and path == "/test/set_room_temp":
             try:
                 room = self.state.set_room_temp(str(body.get("room_id", "")), float(body.get("temp", 0)))
@@ -243,39 +320,6 @@ class HomeServiceApp:
             except StateError as exc:
                 return 400, {"ok": False, "error": exc.message, "code": exc.code}
             return 200, {"ok": True, "device_id": device.id, "online": device.online}
-
-        if method == "POST" and path == "/test/observe":
-            observation = VisualObservation(
-                camera_id=str(body.get("camera_id", "cam0")),
-                track_id=str(body.get("track_id", "")),
-                bbox=tuple(body.get("bbox", (0, 0, 0, 0))),
-                confidence=float(body.get("confidence", 0.5)),
-                observed_at_ms=now_ms(),
-            )
-            self.state.observe(observation)
-            return 200, {"ok": True, "track_id": observation.track_id}
-
-        if method == "POST" and path == "/test/bind_track":
-            try:
-                observation = self.state.bind_track(str(body.get("track_id", "")), str(body.get("person_id", "")))
-            except StateError as exc:
-                return 400, {"ok": False, "error": exc.message, "code": exc.code}
-            return 200, {"ok": True, "track_id": observation.track_id, "person_id": observation.bound_person_id}
-
-        if method == "POST" and path == "/test/lose_track":
-            self.state.lose_track(str(body.get("track_id", "")))
-            return 200, {"ok": True}
-
-        if method == "POST" and path == "/test/person_location_unknown":
-            try:
-                person = self.state.require_person(str(body.get("person_id", "")))
-            except StateError as exc:
-                return 400, {"ok": False, "error": exc.message, "code": exc.code}
-            person.room_id = None
-            person.x = None
-            person.y = None
-            person.version += 1
-            return 200, {"ok": True, "person_id": person.id, "location_known": person.location_known}
 
         return 404, {"ok": False, "error": f"no route for {method} {path}"}
 
@@ -299,6 +343,10 @@ class LiveStateStream:
         self._debounce_timer: threading.Timer | None = None
         self._subscriber: HAEventSubscriber | None = None
         self._stopped = False
+        # Vision-driven publication state; unused by the memory backend, which
+        # publishes immediately.
+        self._vision_publish_at = 0.0
+        self._vision_timer: threading.Timer | None = None
 
         self.publish_snapshot()
         if self.backend == "ha":
@@ -324,6 +372,9 @@ class LiveStateStream:
             if self._debounce_timer is not None:
                 self._debounce_timer.cancel()
                 self._debounce_timer = None
+            if self._vision_timer is not None:
+                self._vision_timer.cancel()
+                self._vision_timer = None
         if self._subscriber is not None:
             self._subscriber.stop()
 
@@ -333,6 +384,13 @@ class LiveStateStream:
                 return self._publish_empty_snapshot_locked()
             return self._latest_snapshot
 
+    def visual_persons(self, generated_at_ms: int) -> list[dict[str, Any]] | None:
+        """Camera-owned persons, or None when the backend has no store attached."""
+        store = getattr(self.app, "visual_state", None)
+        if store is None:
+            return None
+        return store.snapshot(generated_at_ms)
+
     def publish_snapshot(self) -> StreamEvent | None:
         with self._lock:
             if self._stopped:
@@ -341,11 +399,13 @@ class LiveStateStream:
             sequence = self._sequence
             generated = now_ms()
             try:
+                persons = self.visual_persons(generated)
                 if self.backend == "memory":
                     payload = canonical_memory_snapshot(
                         self.app.state.snapshot(),
                         sequence=sequence,
                         generated_at_ms=generated,
+                        persons=persons,
                     )
                 else:
                     status, response = self.app.handle("GET", "/tool/room_status", {}, {})
@@ -355,6 +415,7 @@ class LiveStateStream:
                         response,
                         sequence=sequence,
                         generated_at_ms=generated,
+                        persons=persons,
                     )
             except Exception:
                 self._sequence -= 1
@@ -366,9 +427,49 @@ class LiveStateStream:
             self._latest_snapshot = self.hub.publish("snapshot", payload)
             return self._latest_snapshot
 
-    def after_request(self, method: str, status: int) -> None:
-        if self.backend == "memory" and method == "POST" and 200 <= status < 300:
+    def after_request(self, method: str, status: int, path: str | None = None) -> None:
+        if method != "POST" or not 200 <= status < 300:
+            return
+        if path is not None and path.startswith("/vision/"):
+            # Camera state must reach SSE clients on every backend. Publishing only
+            # for memory left HA clients without person updates until an unrelated
+            # HA entity happened to change.
+            self.publish_after_vision_mutation()
+            return
+        if self.backend == "memory":
             self.publish_snapshot()
+
+    def publish_after_vision_mutation(self) -> None:
+        """Publish camera-driven state promptly, coalescing HA read bursts."""
+        if self.backend == "memory":
+            self.publish_snapshot()
+            return
+        due_now = False
+        with self._lock:
+            if self._stopped:
+                return
+            now = time.monotonic()
+            elapsed = now - self._vision_publish_at
+            if elapsed >= VISION_PUBLISH_MIN_INTERVAL_SECONDS:
+                self._vision_publish_at = now
+                due_now = True
+            elif self._vision_timer is None or not self._vision_timer.is_alive():
+                self._vision_timer = threading.Timer(
+                    VISION_PUBLISH_MIN_INTERVAL_SECONDS - elapsed,
+                    self._publish_vision_tick,
+                )
+                self._vision_timer.daemon = True
+                self._vision_timer.start()
+        if due_now:
+            # Deliberately outside the lock: an HA publish performs a blocking read.
+            self.publish_snapshot()
+
+    def _publish_vision_tick(self) -> None:
+        with self._lock:
+            if self._stopped:
+                return
+            self._vision_publish_at = time.monotonic()
+        self.publish_snapshot()
 
     def _publish_empty_snapshot_locked(self) -> StreamEvent:
         self._sequence += 1
@@ -378,7 +479,7 @@ class LiveStateStream:
             "generated_at_ms": now_ms(),
             "rooms": [],
             "devices": [],
-            "persons": [],
+            "persons": self.visual_persons(now_ms()) or [],
             "broadcasts": [],
             "broadcast_queue": [],
         }
@@ -449,7 +550,18 @@ class _Handler(BaseHTTPRequestHandler):
         if parsed.path == "/events":
             self._respond_sse()
             return
-        status, payload = self.app.handle("GET", parsed.path, parse_qs(parsed.query), {})
+        if parsed.path == "/snapshot":
+            # Use the same canonical snapshot for polling and SSE on both
+            # backends. Publishing here also lazily expires visual observations,
+            # so a quiet camera cannot leave a person visible forever.
+            item = self.server.stream.publish_snapshot()
+            if item is None:
+                item = self.server.stream.snapshot_for_connection()
+            self._respond(200, item.data)
+            return
+        status, payload = self.app.handle(
+            "GET", parsed.path, parse_qs(parsed.query), {}, self._vision_headers()
+        )
         self._respond(status, payload)
 
     def do_POST(self) -> None:  # noqa: N802
@@ -459,9 +571,15 @@ class _Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError as exc:
             self._respond(400, {"ok": False, "error": f"invalid json: {exc}"})
             return
-        status, payload = self.app.handle("POST", parsed.path, parse_qs(parsed.query), body)
+        status, payload = self.app.handle(
+            "POST", parsed.path, parse_qs(parsed.query), body, self._vision_headers()
+        )
         self._respond(status, payload)
-        self.server.stream.after_request("POST", status)
+        self.server.stream.after_request("POST", status, parsed.path)
+
+    def _vision_headers(self) -> dict[str, str]:
+        """Only the shared ingress token is forwarded; no other header is trusted."""
+        return {"X-Vision-Token": self.headers.get("X-Vision-Token") or ""}
 
     def _respond_sse(self) -> None:
         self.send_response(200)
