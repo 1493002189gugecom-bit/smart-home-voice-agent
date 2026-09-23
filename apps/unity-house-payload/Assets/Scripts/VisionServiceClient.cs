@@ -92,6 +92,7 @@ namespace SmartHome
         private Coroutine _pollRoutine;
         private Coroutine _commandRoutine;
         private Coroutine _previewRoutine;
+        private readonly HashSet<UnityWebRequest> _activeRequests = new HashSet<UnityWebRequest>();
 
         private bool _resultsInFlight;
         private bool _registrationInFlight;
@@ -196,19 +197,46 @@ namespace SmartHome
 
         private void OnDisable()
         {
-            if (_previewRoutine != null)
-            {
-                StopCoroutine(_previewRoutine);
-                _previewRoutine = null;
-            }
-
-            if (_pollRoutine != null)
-            {
-                StopCoroutine(_pollRoutine);
-                _pollRoutine = null;
-            }
+            // Native UnityWebRequest operations can outlive their managed
+            // coroutine during a script-domain reload.  Release them while the
+            // current domain is still valid, otherwise Unity later attempts to
+            // free a callback GC handle that belongs to the previous domain.
+            CancelActiveRequests();
+            StopAllCoroutines();
+            _previewRoutine = null;
+            _pollRoutine = null;
+            _commandRoutine = null;
+            _resultsInFlight = false;
+            _registrationInFlight = false;
+            _configInFlight = false;
+            _camerasInFlight = false;
+            _commandCount = 0;
+            _transitionCount = 0;
 
             SetPreview(null);
+        }
+
+        private void CancelActiveRequests()
+        {
+            if (_activeRequests.Count == 0)
+            {
+                return;
+            }
+
+            // Dispose a snapshot because request disposal may complete native
+            // work immediately; the live set must not be enumerated then.
+            var requests = new List<UnityWebRequest>(_activeRequests);
+            _activeRequests.Clear();
+            foreach (UnityWebRequest request in requests)
+            {
+                if (request == null)
+                {
+                    continue;
+                }
+
+                request.Abort();
+                request.Dispose();
+            }
         }
 
         private void OnDestroy()
@@ -383,7 +411,9 @@ namespace SmartHome
 
         private IEnumerator FetchPreview()
         {
-            using (UnityWebRequest request = UnityWebRequest.Get(baseUrl + "/preview.jpg"))
+            UnityWebRequest request = UnityWebRequest.Get(baseUrl + "/preview.jpg");
+            _activeRequests.Add(request);
+            try
             {
                 request.timeout = requestTimeoutSeconds;
                 request.downloadHandler = new DownloadHandlerBuffer();
@@ -419,6 +449,13 @@ namespace SmartHome
 
                 SetPreview(texture);
                 PreviewUpdated?.Invoke(texture);
+            }
+            finally
+            {
+                if (_activeRequests.Remove(request))
+                {
+                    request.Dispose();
+                }
             }
         }
 
@@ -767,7 +804,9 @@ namespace SmartHome
             Action<VisionError> onFailure)
         {
             string url = baseUrl + path;
-            using (UnityWebRequest request = new UnityWebRequest(url, method))
+            UnityWebRequest request = new UnityWebRequest(url, method);
+            _activeRequests.Add(request);
+            try
             {
                 request.downloadHandler = new DownloadHandlerBuffer();
                 if (body != null)
@@ -798,6 +837,13 @@ namespace SmartHome
                 }
 
                 onSuccess(text);
+            }
+            finally
+            {
+                if (_activeRequests.Remove(request))
+                {
+                    request.Dispose();
+                }
             }
         }
 
