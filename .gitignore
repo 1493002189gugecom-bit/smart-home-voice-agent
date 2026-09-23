@@ -53,6 +53,10 @@
 !/apps/vision-service/config/
 !/apps/vision-service/pyproject.toml
 !/apps/vision-service/README.md
+!/apps/perception-console/
+!/apps/perception-console/**
+/apps/perception-console/web/node_modules/
+/apps/perception-console/web/dist/
 !/apps/device-simulator/
 /apps/device-simulator/*
 !/apps/device-simulator/src/
