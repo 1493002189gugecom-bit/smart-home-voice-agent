@@ -394,6 +394,16 @@ namespace SmartHome
                     // Clear the picture: a stale frame next to a disconnected
                     // status would claim the camera is still live.
                     SetPreview(null);
+                    // The service intentionally returns 503 until monitoring or
+                    // registration has produced a first frame. Results/config
+                    // polling remains authoritative for real camera faults, so
+                    // treating this expected empty-preview state as a global
+                    // client error would make the panel flash twice per second.
+                    if (request.responseCode == 503)
+                    {
+                        yield break;
+                    }
+
                     ReportError("/preview.jpg: " + Describe(request));
                     yield break;
                 }
