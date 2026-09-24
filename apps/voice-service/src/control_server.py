@@ -40,6 +40,7 @@ def create_control_server(
                     "service": "voice",
                     "state": bus.state,
                     "history_size": len(bus.history()),
+                    **bus.health_summary,
                 })
                 return
             if path == "/history":

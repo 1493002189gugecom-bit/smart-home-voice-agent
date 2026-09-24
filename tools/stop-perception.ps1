@@ -22,7 +22,9 @@ foreach ($entry in $entries) {
         Write-Host "[$($entry.name)] already stopped"
         continue
     }
-    if (-not $processInfo.CommandLine -or $processInfo.CommandLine -notlike "*$($entry.commandContains)*") {
+    if (-not $processInfo.CommandLine -or
+        $processInfo.CommandLine -notlike "*$($entry.scriptPath)*" -or
+        $processInfo.CreationDate.ToUniversalTime().Ticks -ne [long]$entry.creationTicks) {
         Write-Warning "[$($entry.name)] PID $pidValue no longer matches its recorded command; skipped."
         continue
     }
@@ -31,4 +33,3 @@ foreach ($entry in $entries) {
 }
 
 Remove-Item -LiteralPath $manifestPath -Force
-

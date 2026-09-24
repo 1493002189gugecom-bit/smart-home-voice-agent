@@ -2,13 +2,14 @@
 
 Binds to 127.0.0.1 only. Every JSON body must be an object with exactly the keys
 the route expects, so a typo fails loudly instead of being silently ignored.
-`/preview.jpg` is the only non-JSON response; raw frames are never written to
+`/preview.jpg` and `/preview.mjpeg` are the non-JSON responses; raw frames are never written to
 disk and never leave the machine.
 """
 
 from __future__ import annotations
 
 import json
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlparse
@@ -242,6 +243,16 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _dispatch(self, method: str) -> None:
         parsed = urlparse(self.path)
+        if method in {"POST", "DELETE"}:
+            origin = self.headers.get("Origin")
+            host = self.headers.get("Host", "")
+            allowed_hosts = {f"127.0.0.1:{self.server.server_port}", f"localhost:{self.server.server_port}"}
+            if host not in allowed_hosts or (origin and origin != f"http://{host}") or self.headers.get("Sec-Fetch-Site") not in {None, "none", "same-origin"}:
+                self._send_json(403, {"ok": False, "error_code": "origin_rejected", "message": "local origin required"})
+                return
+            if method == "POST" and self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
+                self._send_json(415, {"ok": False, "error_code": "unsupported_media_type", "message": "application/json required"})
+                return
         try:
             body = self._read_body() if method in {"POST", "DELETE"} else {}
             result = self.app.handle(method, parsed.path, body)
@@ -255,7 +266,43 @@ class _Handler(BaseHTTPRequestHandler):
         self._send_json(status, payload)
 
     def do_GET(self) -> None:  # noqa: N802
+        if self.headers.get("Sec-Fetch-Site") not in {None, "none", "same-origin"}:
+            self._send_json(403, {"ok": False, "error_code": "origin_rejected", "message": "local origin required"})
+            return
+        if urlparse(self.path).path == "/preview.mjpeg":
+            self._stream_preview()
+            return
         self._dispatch("GET")
+
+    def _stream_preview(self) -> None:
+        if self.app.runtime.preview_jpeg() is None:
+            self._send_json(503, {"ok": False, "error_code": "preview_unavailable", "message": "当前没有可用画面"})
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        previous = None
+        unavailable_since = None
+        try:
+            while True:
+                frame = self.app.runtime.preview_jpeg()
+                if frame is None:
+                    unavailable_since = unavailable_since or time.monotonic()
+                    if time.monotonic() - unavailable_since >= 2:
+                        break
+                else:
+                    unavailable_since = None
+                    if frame != previous:
+                        header = b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + str(len(frame)).encode("ascii") + b"\r\n\r\n"
+                        self.wfile.write(header + frame + b"\r\n")
+                        self.wfile.flush()
+                        previous = frame
+                time.sleep(0.1)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            self.close_connection = True
 
     def do_POST(self) -> None:  # noqa: N802
         self._dispatch("POST")

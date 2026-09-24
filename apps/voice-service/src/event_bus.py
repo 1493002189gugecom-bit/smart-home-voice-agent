@@ -40,6 +40,7 @@ class VoiceEventBus:
         self._lock = threading.RLock()
         self._sequence = 0
         self.state = "starting"
+        self.health_summary: dict[str, Any] = {}
 
     def publish(self, event_type: str, **payload: Any) -> dict[str, Any]:
         with self._lock:

@@ -33,7 +33,7 @@
 
 模型默认存放在仓库外的 `D:\smart-home-models`，密钥和 Home Assistant 凭据存放在 Git 忽略的 `runtime/`。
 
-统一感知中心（摄像头、人脸注册、语音记录、设备和服务状态）可用一个命令启动。默认连接真实 Home Assistant；它只会关闭自己创建的进程：
+统一感知中心（摄像头、人脸注册、语音记录、设备和服务状态）完成一次前端构建后，可用一个命令启动。首次使用先在 `apps\perception-console\web` 运行 `npm ci` 和 `npm run build`。默认连接真实 Home Assistant；启动器只会关闭自己创建的进程：
 
 ```powershell
 cd E:\smart-home

@@ -27,25 +27,10 @@ if (-not (Test-Path $frontendIndex -PathType Leaf)) {
     throw 'Perception UI is not built. Run npm install and npm run build in apps\perception-console\web first.'
 }
 
-foreach ($required in @($python, $visionPython)) {
-    if (-not (Test-Path $required -PathType Leaf)) { throw "Required Python interpreter not found: $required" }
-}
+if (-not (Test-Path $python -PathType Leaf)) { throw "Required Python interpreter not found: $python" }
 
 New-Item -ItemType Directory -Path $runtimeRoot -Force | Out-Null
 
-if ($HomeBackend -eq 'ha') {
-    $haEnv = Join-Path $repoRoot 'runtime\home-assistant\ha.env'
-    if (-not (Test-Path $haEnv -PathType Leaf)) {
-        throw "Home Assistant credentials are missing: $haEnv. Use -HomeBackend memory only for local simulation."
-    }
-    $env:HOME_SERVICE_BACKEND = 'ha'
-    $env:HOME_ASSISTANT_URL = 'http://127.0.0.1:8123'
-    $env:HA_ENV_FILE = $haEnv
-    $env:HA_OPERATION_DB = Join-Path $repoRoot 'runtime\home-assistant\operations.sqlite3'
-}
-else {
-    $env:HOME_SERVICE_BACKEND = 'memory'
-}
 $env:PYTHONIOENCODING = 'utf-8'
 
 function Test-ListeningPort {
@@ -57,9 +42,17 @@ function Test-Endpoint {
     param([string]$Uri)
     try {
         $response = Invoke-WebRequest -Uri $Uri -UseBasicParsing -TimeoutSec 2
-        return $response.StatusCode -ge 200 -and $response.StatusCode -lt 500
+        return $response.StatusCode -ge 200 -and $response.StatusCode -lt 300
     }
     catch { return $false }
+}
+
+function Test-OwnedEntry {
+    param($Entry)
+    $processInfo = Get-CimInstance Win32_Process -Filter "ProcessId = $([int]$Entry.pid)" -ErrorAction SilentlyContinue
+    if ($null -eq $processInfo -or -not $processInfo.CommandLine) { return $false }
+    if ($processInfo.CommandLine -notlike "*$($Entry.scriptPath)*") { return $false }
+    return $processInfo.CreationDate.ToUniversalTime().Ticks -eq [long]$Entry.creationTicks
 }
 
 function Get-OwnedProcesses {
@@ -74,8 +67,7 @@ function Get-OwnedProcesses {
 
     $live = @()
     foreach ($entry in @($previous.processes)) {
-        $processInfo = Get-CimInstance Win32_Process -Filter "ProcessId = $([int]$entry.pid)" -ErrorAction SilentlyContinue
-        if ($null -ne $processInfo -and $processInfo.CommandLine -like "*$($entry.commandContains)*") {
+        if (Test-OwnedEntry -Entry $entry) {
             $live += $entry
         }
     }
@@ -116,26 +108,61 @@ $services = @(
 
 $owned = @(Get-OwnedProcesses)
 foreach ($service in $services) {
+    $ownedEntry = $owned | Where-Object { $_.name -eq $service.Name } | Select-Object -First 1
+    if ($null -ne $ownedEntry -and (Test-OwnedEntry -Entry $ownedEntry)) {
+        Write-Host "[$($service.Name)] existing launcher-owned process is still starting or running (PID $($ownedEntry.pid))"
+        continue
+    }
     if (Test-Endpoint -Uri $service.Health) {
         Write-Host "[$($service.Name)] using healthy existing service on 127.0.0.1:$($service.Port)"
         continue
     }
     if (Test-ListeningPort -Port $service.Port) {
-        throw "[$($service.Name)] port $($service.Port) is occupied, but its health endpoint did not respond."
+        Write-Warning "[$($service.Name)] port $($service.Port) is occupied, but its health endpoint did not respond."
+        continue
     }
-    if (-not (Test-Path $service.Script -PathType Leaf)) { throw "Service script not found: $($service.Script)" }
+    if (-not (Test-Path $service.Python -PathType Leaf)) {
+        Write-Warning "[$($service.Name)] Python interpreter not found: $($service.Python)"
+        continue
+    }
+    if (-not (Test-Path $service.Script -PathType Leaf)) {
+        Write-Warning "[$($service.Name)] service script not found: $($service.Script)"
+        continue
+    }
+    if ($service.Name -eq 'home') {
+        $env:HOME_SERVICE_BACKEND = $HomeBackend
+        if ($HomeBackend -eq 'ha') {
+            $haEnv = Join-Path $repoRoot 'runtime\home-assistant\ha.env'
+            if (-not (Test-Path $haEnv -PathType Leaf)) {
+                Write-Warning "Home Assistant credentials are missing: $haEnv. Home service was not started."
+                continue
+            }
+            $env:HOME_ASSISTANT_URL = 'http://127.0.0.1:8123'
+            $env:HA_ENV_FILE = $haEnv
+            $env:HA_OPERATION_DB = Join-Path $repoRoot 'runtime\home-assistant\operations.sqlite3'
+        }
+    }
 
-    $stdout = Join-Path $runtimeRoot "$($service.Name).out.log"
-    $stderr = Join-Path $runtimeRoot "$($service.Name).err.log"
     $argumentList = @($service.Script) + $service.Arguments
-    $process = Start-Process -FilePath $service.Python -ArgumentList $argumentList `
-        -WorkingDirectory $repoRoot -RedirectStandardOutput $stdout -RedirectStandardError $stderr `
-        -WindowStyle Hidden -PassThru
+    try {
+        # Services can print transcripts, paths, or credentials; do not persist stdout/stderr.
+        $process = Start-Process -FilePath $service.Python -ArgumentList $argumentList `
+            -WorkingDirectory $repoRoot -WindowStyle Hidden -PassThru
+    }
+    catch {
+        Write-Warning "[$($service.Name)] failed to start: $($_.Exception.GetType().Name)"
+        continue
+    }
+    $processInfo = Get-CimInstance Win32_Process -Filter "ProcessId = $($process.Id)" -ErrorAction SilentlyContinue
+    if ($null -eq $processInfo) {
+        Write-Warning "[$($service.Name)] process exited before it could be recorded; inspect its status in the console."
+        continue
+    }
     $owned += [pscustomobject]@{
         name = $service.Name
         pid = $process.Id
-        commandContains = [IO.Path]::GetFileName($service.Script)
-        startedAt = [DateTimeOffset]::Now.ToString('o')
+        scriptPath = $service.Script
+        creationTicks = $processInfo.CreationDate.ToUniversalTime().Ticks
     }
     Save-Manifest -Processes $owned
     Write-Host "[$($service.Name)] started (PID $($process.Id))"
@@ -146,7 +173,7 @@ Save-Manifest -Processes $owned
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
 while (-not (Test-Endpoint -Uri 'http://127.0.0.1:8770/api/status')) {
     if ((Get-Date) -gt $deadline) {
-        throw "Perception console did not become ready. Inspect logs under $runtimeRoot."
+        throw 'Perception console did not become ready. Check the service status and local environment.'
     }
     Start-Sleep -Milliseconds 500
 }

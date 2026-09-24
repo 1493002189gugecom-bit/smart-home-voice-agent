@@ -15,7 +15,7 @@
 - Bind all new servers to `127.0.0.1` only.
 - Do not persist raw camera frames, raw audio, transcripts, or replies.
 - Do not expose API keys, complete model paths, or complete camera URLs.
-- Do not run tests, builds, model inference, camera validation, microphone validation, or screenshot acceptance.
+- Do not run tests, model inference, camera validation, microphone validation, or screenshot acceptance. A React production build is allowed by the user's later instruction.
 - Work directly on `main` as explicitly requested by the user.
 - Remove Unity vision-management scripts only after removing their scene components.
 
@@ -109,7 +109,7 @@
 - Preserves: `HomeServiceClient`, home SSE models, scene state application and person-room visualization.
 - Removes: every Unity connection to ports 8766 and 8770 and every camera/registration control.
 
-- [ ] Stop Unity Play Mode and remove Vision components from the generated scene through the third-party Unity MCP.
+- [ ] Stop Unity Play Mode and remove Vision components from the generated scene through the third-party Unity MCP. (Unity CLI/MCP unavailable; no Editor running. Removed only the three identified YAML components offline.)
 - [ ] Save the scene before deleting scripts.
 - [ ] Delete old vision UI/client scripts and their metadata from both payload and actual project.
 - [ ] Search both Unity trees for remaining `VisionServiceClient`, `VisionCameraPanel`, `VisionCameraLauncher`, `VisionOverlayGraphic` and `127.0.0.1:8766` references; remove only vision-management references.

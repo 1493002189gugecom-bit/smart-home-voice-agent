@@ -324,8 +324,9 @@ forbidden-command terms.
 Say “小屋小屋” or “你好小屋”; a short two-note prompt confirms wake-up,
 then speak commands continuously. The full 20-second waiting window starts only
 after the reply finishes. Microphone blocks are discarded during processing and
-playback. Events are appended as timestamped JSON lines to
-`docs/superpowers/reports/artifacts/loop-session.log`. This Phase A loop does
+playback. Public events remain in memory for the current process. For explicit
+diagnostics only, `--log-file <path>` writes timestamped JSON lines that may
+include conversation text. This Phase A loop does
 not call a cloud LLM and cannot control devices.
 
 ## Automated checks

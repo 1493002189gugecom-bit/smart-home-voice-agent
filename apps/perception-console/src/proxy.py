@@ -23,7 +23,7 @@ SERVICES = {
         "GET": ("/health", "/state", "/snapshot", "/events", "/tool/room_status", "/tool/person_location", "/tool/device_status"),
     }),
     "vision": Service("vision", "http://127.0.0.1:8766", {
-        "GET": ("/health", "/config", "/cameras", "/results", "/preview.jpg", "/registration"),
+        "GET": ("/health", "/config", "/cameras", "/results", "/preview.jpg", "/preview.mjpeg", "/registration"),
         "POST": ("/camera/select", "/room/select", "/monitor/start", "/monitor/pause", "/registration/start", "/registration/cancel"),
         "DELETE": ("/registration/",),
     }),
@@ -35,6 +35,14 @@ SERVICES = {
 
 class ProxyRejected(ValueError):
     pass
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        return None
+
+
+_opener = urllib.request.build_opener(_NoRedirect)
 
 
 def resolve_target(service_name: str, method: str, suffix: str) -> str:
@@ -58,5 +66,4 @@ def open_upstream(service_name: str, method: str, suffix: str, body: bytes | Non
     if body is not None:
         headers["Content-Type"] = "application/json"
     request = urllib.request.Request(target, data=body, headers=headers, method=method.upper())
-    return urllib.request.urlopen(request, timeout=timeout)
-
+    return _opener.open(request, timeout=timeout)

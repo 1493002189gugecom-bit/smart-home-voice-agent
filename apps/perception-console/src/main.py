@@ -22,7 +22,10 @@ def _service_status(name: str) -> dict:
     try:
         with open_upstream(name, "GET", "/health", None, timeout=2.0) as response:
             payload = json.loads(response.read().decode("utf-8"))
-        return {"state": "up" if payload.get("ok", True) else "degraded", "data": payload}
+        healthy = payload.get("ok", True)
+        if name == "vision" and (payload.get("model_ready") is False or payload.get("mode") == "error"):
+            healthy = False
+        return {"state": "up" if healthy else "degraded", "data": payload}
     except Exception as exc:
         return {"state": "down", "error_code": "service_unavailable", "message": type(exc).__name__}
 
@@ -42,6 +45,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def _dispatch(self, method: str) -> None:
         parsed = urlsplit(self.path)
+        if parsed.path.startswith("/api/"):
+            host = self.headers.get("Host", "")
+            allowed_hosts = {f"127.0.0.1:{self.server.server_port}", f"localhost:{self.server.server_port}"}
+            origin = self.headers.get("Origin")
+            allowed_origins = {f"http://{host}", "http://127.0.0.1:5173", "http://localhost:5173"}
+            fetch_site = self.headers.get("Sec-Fetch-Site")
+            if host not in allowed_hosts or (origin and origin not in allowed_origins) or fetch_site not in {None, "none", "same-origin"}:
+                self._json(403, {"ok": False, "error_code": "origin_rejected", "message": "local origin required"})
+                return
         if parsed.path == "/api/status" and method == "GET":
             with ThreadPoolExecutor(max_workers=3) as pool:
                 futures = {name: pool.submit(_service_status, name) for name in SERVICES}
@@ -66,9 +78,19 @@ class Handler(BaseHTTPRequestHandler):
         suffix = "/" + parts[3]
         if parsed.query:
             suffix += "?" + parsed.query
-        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self._json(400, {"ok": False, "service": service_name, "error_code": "invalid_length", "message": "invalid request length"})
+            return
+        if length < 0:
+            self._json(400, {"ok": False, "service": service_name, "error_code": "invalid_length", "message": "invalid request length"})
+            return
         if length > MAX_REQUEST_BODY:
             self._json(413, {"ok": False, "error_code": "body_too_large", "message": "request body exceeds 1 MiB"})
+            return
+        if method == "POST" and self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
+            self._json(415, {"ok": False, "service": service_name, "error_code": "unsupported_media_type", "message": "application/json required"})
             return
         body = self.rfile.read(length) if length else None
         try:
@@ -85,7 +107,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         content_type = response.headers.get("Content-Type", "application/octet-stream")
-        if content_type.startswith("text/event-stream"):
+        if content_type.startswith(("text/event-stream", "multipart/x-mixed-replace")):
             self.send_response(response.status)
             self.send_header("Content-Type", content_type)
             self.send_header("Cache-Control", "no-store")
@@ -93,7 +115,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             try:
                 while True:
-                    block = response.read(4096)
+                    block = response.read1(4096)
                     if not block:
                         break
                     self.wfile.write(block)
@@ -165,4 +187,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

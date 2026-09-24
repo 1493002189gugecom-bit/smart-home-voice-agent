@@ -174,12 +174,23 @@ def run_text_session(agent, tts, output_target, args, log_event, log_handle) -> 
                 log_event(
                     "agent_reply",
                     state="active",
+                    text=reply_text,
                     ok=reply.ok,
                     error_code=reply.error_code,
                     end_conversation=reply.end_conversation,
                     tools=[result.name for result in reply.tool_results],
                     seconds=round(time.perf_counter() - started, 3),
                 )
+                for result in reply.tool_results:
+                    log_event(
+                        "tool_result",
+                        state="active",
+                        name=result.name,
+                        ok=result.ok,
+                        error_code=result.error_code,
+                        phrase=result.phrase,
+                        operation_id=result.operation_id,
+                    )
             print(f"小屋> {reply_text}")
             if tts is not None:
                 try:
@@ -196,7 +207,8 @@ def run_text_session(agent, tts, output_target, args, log_event, log_handle) -> 
         print("\nstopped")
         log_event("keyboard_interrupt", state="active")
     finally:
-        log_handle.close()
+        if log_handle is not None:
+            log_handle.close()
     return 0
 
 
@@ -206,7 +218,7 @@ def main() -> int:
     parser.add_argument("--input-contains", "--input-device", dest="input_contains", default=config.DEFAULT_INPUT_DEVICE)
     parser.add_argument("--output-contains", "--output-device", dest="output_contains", default=config.DEFAULT_OUTPUT_DEVICE)
     parser.add_argument("--idle-timeout", type=float, default=IDLE_TIMEOUT_SECONDS)
-    parser.add_argument("--log-file", type=Path, default=Path("docs/superpowers/reports/artifacts/loop-session.log"))
+    parser.add_argument("--log-file", type=Path, default=None, help="opt-in diagnostic log; may contain conversation text")
     parser.add_argument("--speaker-id", type=int, default=47)
     parser.add_argument("--no-tts", action="store_true", help="print only; useful for diagnostics")
     parser.add_argument("--startup-check", action="store_true", help="validate devices/models, then exit without opening the microphone")
@@ -279,9 +291,17 @@ def main() -> int:
         print("startup check OK: devices and all requested models initialized")
         return 0
 
-    args.log_file.parent.mkdir(parents=True, exist_ok=True)
-    log_handle = args.log_file.open("a", encoding="utf-8", buffering=1)
+    log_handle = None
+    if args.log_file is not None:
+        args.log_file.parent.mkdir(parents=True, exist_ok=True)
+        log_handle = args.log_file.open("a", encoding="utf-8", buffering=1)
     event_bus = VoiceEventBus(max_events=200)
+    event_bus.health_summary = {
+        "input_device": input_device.name,
+        "output_device": output_target.describe() if output_target is not None else None,
+        "agent_enabled": agent is not None,
+        "loop_mode": "text" if args.text else "microphone",
+    }
     control_server = None
     if not args.no_control_api:
         control_server = create_control_server(event_bus, args.control_host, args.control_port)
@@ -307,6 +327,14 @@ def main() -> int:
         "voice_error": "service_error",
         "audio_status": "service_error",
     }
+    public_fields = {
+        "voice_state": {"state", "keyword", "reason"},
+        "transcript": {"state", "transcript", "seconds"},
+        "agent_reply": {"state", "text", "ok", "error_code", "end_conversation", "tools", "seconds"},
+        "tool_result": {"state", "name", "ok", "error_code", "phrase", "operation_id"},
+        "playback_state": {"state", "text", "synth_seconds"},
+        "service_error": {"state", "error_type"},
+    }
 
     def log_event(event: str, **fields) -> None:
         record = {
@@ -314,10 +342,12 @@ def main() -> int:
             "event": event,
             **fields,
         }
-        log_handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        if log_handle is not None:
+            log_handle.write(json.dumps(record, ensure_ascii=False) + "\n")
         public_type = public_event_types.get(event)
         if public_type is not None:
-            event_bus.publish(public_type, source_event=event, **fields)
+            safe = {key: value for key, value in fields.items() if key in public_fields[public_type]}
+            event_bus.publish(public_type, source_event=event, **safe)
 
     if args.text:
         try:
@@ -468,6 +498,7 @@ def main() -> int:
                                     log_event(
                                         "agent_reply",
                                         state=state,
+                                        text=reply_text,
                                         ok=agent_reply.ok,
                                         error_code=agent_reply.error_code,
                                         end_conversation=agent_reply.end_conversation,
@@ -558,7 +589,8 @@ def main() -> int:
     finally:
         print(f"audio queue overflows: {overflow_count}")
         log_event("stopped", state=state, audio_queue_overflows=overflow_count)
-        log_handle.close()
+        if log_handle is not None:
+            log_handle.close()
         if control_server is not None:
             control_server.shutdown()
             control_server.server_close()

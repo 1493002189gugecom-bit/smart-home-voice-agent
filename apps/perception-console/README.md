@@ -8,6 +8,8 @@ proxies only explicit allow-listed routes to ports 8765–8767.
 
 - `src/main.py`: static host, unified health, and HTTP/SSE proxy.
 - `src/proxy.py`: service map, route allow-list, and 1 MiB request limit.
+- The vision view uses a continuous `/api/vision/preview.mjpeg` stream; the gateway
+  relays each JPEG part without saving frames.
 - `web/`: React + TypeScript + Vite source.
 - `web/dist/`: generated production assets; intentionally not authored by hand.
 
@@ -17,7 +19,7 @@ Build the checked-in React source with:
 
 ```powershell
 cd E:\smart-home\apps\perception-console\web
-npm install
+npm ci
 npm run build
 ```
 

@@ -16,13 +16,13 @@ voice agent and to Unity.
 | Bind address | `127.0.0.1:8766` only — never the LAN |
 | Device control | none; no Home Assistant tool, alarm, or speech output |
 | Cameras | exactly one physical camera active at a time |
-| Raw frames | memory and the current Unity preview only; never written to disk |
+| Raw frames | memory and the local perception console preview only; never written to disk |
 | Locations | only `living_room`, `bedroom`, `kitchen`, and only as observations |
 
 ## Offline model setup (required, and never automatic)
 
 Startup must **never** download a model. If a file is absent, the API reports
-`model_missing` and continues running so the Unity panel can explain why.
+`model_missing` and continues running so the perception console can explain why.
 
 | Model | Expected path | Notes |
 | --- | --- | --- |
@@ -75,7 +75,7 @@ $env:HOME_SERVICE_BACKEND = 'ha'
 # 2) vision-service reads that token and the local models
 .\.venv-vision\Scripts\python.exe apps\vision-service\src\main.py
 
-# 3) Unity last, so the house already has a snapshot to show
+# 3) Start the perception console; Unity may independently read home-service SSE
 ```
 
 Check the configuration without opening a camera or a model:
@@ -85,7 +85,7 @@ Check the configuration without opening a camera or a model:
 ```
 
 Starting vision-service before home-service is not fatal: it reports
-`sync_state: disconnected` and the Unity panel says the location is not synced,
+`sync_state: disconnected` and the perception console says the location is not synced,
 rather than pretending a person was placed.
 
 ## Local API
@@ -104,6 +104,7 @@ JSON bodies must be objects with exactly the documented keys; a typo returns
 | POST | `/monitor/pause` | `{}` |
 | GET | `/results` | — |
 | GET | `/preview.jpg` | — (JPEG, `Cache-Control: no-store`) |
+| GET | `/preview.mjpeg` | — (continuous multipart JPEG stream, no-store) |
 | POST | `/registration/start` | `{"person_id":"dad"}` |
 | GET | `/registration` | — |
 | POST | `/registration/cancel` | `{}` |
@@ -167,5 +168,5 @@ FPS, recognition rate, or visual correctness.
    provenance is correct.
 6. After camera switching, disconnect, or a person leaving, no stale position
    remains.
-7. Unity, vision-service, home-service, and the existing voice service can run at
+7. Unity, perception-console, vision-service, home-service, and voice-service can run at
    the same time.
