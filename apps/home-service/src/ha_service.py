@@ -332,12 +332,25 @@ class HAServiceApp:
 
         if method == "GET" and path == "/health":
             return 200, {"ok": True, "backend": "ha", "tools": list(CONTROL_TOOLS)}
+        if path == "/persons" and self.visual_state is not None:
+            if method == "GET":
+                return 200, {"ok": True, "persons": self.visual_state.persons_directory()}
+            if method == "POST":
+                try:
+                    if set(body) != {"display_name"}:
+                        raise ValueError("请只填写人物称呼")
+                    person = self.visual_state.create_person(body["display_name"])
+                except ValueError as exc:
+                    return 422, {"ok": False, "message": str(exc)}
+                return 201, {"ok": True, "person": person}
         if method == "GET" and path == "/catalog":
             return 200, {"ok": True, "data": {"devices": self.catalog_view(), "scenes": self.scene_view()}}
         if method == "GET" and path == "/tool/device_status":
             return self._query_devices(self._first(query, "device"), self._first(query, "room"))
         if method == "GET" and path == "/tool/room_status":
             return self._query_rooms(self._first(query, "room"))
+        if method == "GET" and path == "/tool/person_location":
+            return self._query_persons(self._first(query, "person"))
         if method == "POST" and path == "/tool/set_light":
             return self._control("set_light", body)
         if method == "POST" and path == "/tool/set_ac":
@@ -448,6 +461,51 @@ class HAServiceApp:
         except GatewayError as exc:
             return self._gateway_status(exc.code), _error(exc.code)
         return 200, {"ok": True, "data": {"rooms": payload}, "error": None, "error_code": None}
+
+    def _query_persons(self, person: str | None = None):
+        """Who the camera currently sees, and where.
+
+        The HA backend keeps no person state of its own, so this reads the shared
+        camera-owned store. `location_known` false means "not seen right now",
+        never the room the person was in a moment ago: the voice agent speaks
+        this answer out loud, so a stale room would be a plain lie.
+        """
+        if self.visual_state is None:
+            return 400, _error("not_found")
+        directory = self.visual_state.persons_directory()
+        wanted = (person or "").strip()
+        if wanted:
+            directory = [
+                item for item in directory if wanted in {item["id"], item["display_name"]}
+            ]
+            if not directory:
+                return 400, _error("not_found")
+
+        rooms = {item["room_id"]: item["room_name"] for item in self.catalog.values()}
+        observed = {
+            item["id"]: item for item in self.visual_state.snapshot(int(time.time() * 1000))
+        }
+        payload = []
+        for entry in directory:
+            seen = observed.get(entry["id"]) or {}
+            room_id = seen.get("room_id")
+            payload.append({
+                "id": entry["id"],
+                "display_name": entry["display_name"],
+                "room_id": room_id,
+                "room_name": rooms.get(room_id, room_id) if room_id else None,
+                "location_known": bool(room_id),
+                "location_source": "camera",
+                "camera_id": seen.get("camera_id"),
+                "track_id": seen.get("track_id"),
+                "pose": seen.get("pose") or "unknown",
+                "pose_confidence": seen.get("pose_confidence") or 0.0,
+                "observed_at_ms": seen.get("observed_at_ms"),
+                "x": seen.get("x"),
+                "y": seen.get("y"),
+                "version": seen.get("version"),
+            })
+        return 200, {"ok": True, "data": {"persons": payload}, "error": None, "error_code": None}
 
     def _normalize_request(self, kind: str, body: dict[str, Any]):
         if not isinstance(body, dict):
@@ -774,14 +832,14 @@ class HAServiceApp:
 
     # ------------------------------------------------------------- comfort
     def _adjust_ac(self, body: dict[str, Any]):
-        """Move the AC by one configured step, or turn it on at the comfort default.
+        """Move the AC by an explicit number of degrees or one configured step.
 
         The direction comes from the user's words; every number comes from the
         catalog. This is what keeps "有点热" from turning into a temperature the
         model made up.
         """
         operation_id = body.get("operation_id") if isinstance(body, dict) else None
-        if not isinstance(body, dict) or set(body) - {"device_id", "direction", "operation_id"}:
+        if not isinstance(body, dict) or set(body) - {"device_id", "direction", "degrees", "operation_id"}:
             return 400, _error("invalid_request", operation_id if isinstance(operation_id, str) else None)
         if not isinstance(operation_id, str) or not operation_id.strip():
             return 400, _error("invalid_request")
@@ -791,11 +849,19 @@ class HAServiceApp:
             return 400, _error("invalid_request", operation_id)
         if direction not in {"cooler", "warmer"}:
             return 400, _error("invalid_request", operation_id)
+        degrees = body.get("degrees")
+        if degrees is not None:
+            if (isinstance(degrees, bool) or not isinstance(degrees, (int, float))
+                    or not math.isfinite(degrees) or not 0 < degrees <= 14):
+                return 400, _error("invalid_request", operation_id)
+            degrees = float(degrees)
 
         with self._device_lock(device_id):
             try:
                 reservation = self.store.reserve(
-                    operation_id, "adjust_ac", device_id, {"direction": direction}, {"direction": direction}
+                    operation_id, "adjust_ac", device_id,
+                    {"direction": direction, "degrees": degrees},
+                    {"direction": direction, "degrees": degrees},
                 )
             except OperationConflict:
                 return 409, _error("operation_id_conflict", operation_id)
@@ -808,9 +874,10 @@ class HAServiceApp:
                 return self._reject(operation, "not_found")
             if record["type"] != "ac":
                 return self._reject(operation, "wrong_type")
-            return self._execute_adjust(operation, record, direction)
+            return self._execute_adjust(operation, record, direction, degrees)
 
-    def _plan_adjust(self, record: dict[str, Any], entity: dict[str, Any], direction: str):
+    def _plan_adjust(self, record: dict[str, Any], entity: dict[str, Any], direction: str,
+                     degrees: float | None = None):
         """Return ``(desired_state, service_calls, phrase)`` from local config."""
         confirmation = record["confirmation"]
         comfort = float(confirmation["comfort_temp"])
@@ -822,7 +889,12 @@ class HAServiceApp:
         entity_id = record["entity_id"]
         state = entity["state"]
 
+        if degrees is not None and abs(degrees / step - round(degrees / step)) > 1e-8:
+            return None, None, "温度变化量不符合空调的调节精度"
+
         if not state.get("on"):
+            if degrees is not None:
+                return None, None, "空调当前关闭，请先打开再调整温度"
             if direction == "warmer":
                 # Raising the target of a unit that is off would not warm anything.
                 return None, None, "空调现在是关着的，要打开吗"
@@ -840,7 +912,10 @@ class HAServiceApp:
 
         current = state.get("target_temp")
         base = float(current) if isinstance(current, (int, float)) else comfort
-        target = base - step if direction == "cooler" else base + step
+        amount = step if degrees is None else degrees
+        target = base - amount if direction == "cooler" else base + amount
+        if degrees is not None and not minimum <= target <= maximum:
+            return None, None, "目标温度超出空调允许范围"
         target = max(minimum, min(maximum, target))
         desired = {"on": True, "target_temp": target}
         if target == base:
@@ -850,7 +925,8 @@ class HAServiceApp:
             (domain, services["temperature"], {"entity_id": entity_id, "temperature": target})
         ], f"已把{record['name']}调到 {target:g} 度"
 
-    def _execute_adjust(self, operation: Operation, record: dict[str, Any], direction: str):
+    def _execute_adjust(self, operation: Operation, record: dict[str, Any], direction: str,
+                        degrees: float | None = None):
         try:
             entity = self._read(operation.target_id)
         except GatewayError as exc:
@@ -858,7 +934,7 @@ class HAServiceApp:
         if not entity["online"]:
             return self._reject(operation, "offline")
 
-        desired, calls, phrase = self._plan_adjust(record, entity, direction)
+        desired, calls, phrase = self._plan_adjust(record, entity, direction, degrees)
         if desired is None:
             return self._reject(operation, "not_applicable")
         if not calls or self._matches(entity, desired):

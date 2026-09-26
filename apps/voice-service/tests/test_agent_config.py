@@ -78,15 +78,14 @@ def test_invalid_numeric_overrides_fall_back_to_defaults(monkeypatch, value):
     assert config.agent_max_tool_rounds() == config.DEFAULT_AGENT_MAX_TOOL_ROUNDS
 
 
-def test_loop_refuses_to_start_with_the_agent_enabled_but_no_key(monkeypatch, tmp_path, capsys):
+def test_startup_check_reports_missing_agent_key_without_leaking_it(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("SMART_HOME_AGENT_ENV_FILE", str(tmp_path / "absent.env"))
-    monkeypatch.setattr("sys.argv", ["loop.py", "--agent"])
+    monkeypatch.setattr("sys.argv", ["loop.py", "--agent", "--startup-check"])
 
-    assert loop.main() == 2
+    with pytest.raises(loop.VoiceStartupError, match="agent_key_missing"):
+        loop.main()
 
     printed = capsys.readouterr().err
-    assert "DEEPSEEK_API_KEY" in printed
-    # The failure must be actionable without printing any secret.
     assert SECRET not in printed
 
 

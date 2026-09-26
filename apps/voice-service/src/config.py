@@ -43,11 +43,9 @@ TTS_SAMPLE_RATE = 24000
 # Virtual surround endpoints often expose only 48 kHz; resample when needed.
 OUTPUT_FALLBACK_SAMPLE_RATE = 48000
 
-# The Windows default input on this machine was a virtual NetEase device, so a
-# physical device is selected explicitly by name instead. Device names change
-# when headsets are plugged in, so this is an ordered preference list: the first
-# candidate that opens as mono float32 at the required rate wins. Override the
-# whole list with SMART_HOME_INPUT_DEVICE (comma-separated substrings).
+# Automatic selection checks the current Windows default first. If it cannot
+# use that endpoint, these names provide ordered fallbacks. Override the whole
+# fallback list with SMART_HOME_INPUT_DEVICE (comma-separated substrings).
 DEFAULT_INPUT_DEVICE_CANDIDATES = (
     "HyperX",
     "Realtek",
@@ -294,3 +292,158 @@ def _positive_float(name: str, fallback: float) -> float:
     except (TypeError, ValueError):
         return fallback
     return value if value > 0 else fallback
+
+
+# ---------------------------------------------------------------- voiceprints
+# Voiceprint identification is opt-in. `SMART_HOME_SPEAKER_MODEL` unset means the
+# whole feature is off and the assistant behaves exactly as it did before, which is
+# the only safe default for a household that has enrolled nobody.
+DEFAULT_VISION_SERVICE_URL = "http://127.0.0.1:8766"
+DEFAULT_SPEAKER_MIN_SECONDS = 1.5
+DEFAULT_SPEAKER_MATCH_THRESHOLD = 0.55
+DEFAULT_SPEAKER_MARGIN_THRESHOLD = 0.08
+DEFAULT_SPEAKER_ENROLL_SAMPLES = 5
+
+
+def _local_env(name: str) -> str:
+    """Read one setting from the environment, else from the local env file.
+
+    The same Git-ignored file the LLM key lives in, so every machine-local setting
+    for this service sits in one place and survives a restart instead of having to be
+    exported in whichever shell happened to launch the service.
+    """
+
+    value = os.environ.get(name, "").strip()
+    if value:
+        return value
+    path = agent_env_file()
+    if not path.exists():
+        return ""
+    try:
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+    except OSError:
+        return ""
+    for line in lines:
+        key, separator, raw = line.partition("=")
+        if separator and key.strip() == name:
+            return raw.strip().strip("\"'")
+    return ""
+
+
+def _speaker_float(name: str, fallback: float) -> float:
+    try:
+        value = float(_local_env(name))
+    except (TypeError, ValueError):
+        return fallback
+    return value if value > 0 else fallback
+
+
+def speaker_model_path() -> Path | None:
+    """The speaker ONNX file, or None when voiceprint identification is disabled."""
+
+    raw = _local_env("SMART_HOME_SPEAKER_MODEL")
+    return Path(raw) if raw else None
+
+
+def vision_service_url() -> str:
+    """The gallery owner. Voiceprints are matched there, never here."""
+    return _local_env("SMART_HOME_VISION_URL") or DEFAULT_VISION_SERVICE_URL
+
+
+def speaker_min_seconds() -> float:
+    return _speaker_float("SMART_HOME_SPEAKER_MIN_SECONDS", DEFAULT_SPEAKER_MIN_SECONDS)
+
+
+def speaker_match_threshold() -> float:
+    return _speaker_float("SMART_HOME_SPEAKER_MATCH_THRESHOLD", DEFAULT_SPEAKER_MATCH_THRESHOLD)
+
+
+def speaker_margin_threshold() -> float:
+    return _speaker_float("SMART_HOME_SPEAKER_MARGIN_THRESHOLD", DEFAULT_SPEAKER_MARGIN_THRESHOLD)
+
+
+def speaker_provider() -> str:
+    """Execution provider for the embedding model.
+
+    `cpu` is the default because the installed sherpa-onnx wheel is CPU-only and the
+    GPU is already busy with pose and face inference. A CUDA-enabled build can be
+    selected here; a wrong value fails loudly at load rather than silently.
+    """
+
+    return _local_env("SMART_HOME_SPEAKER_PROVIDER") or "cpu"
+
+
+def speaker_threads() -> int:
+    """Threads for one embedding. One utterance at a time rarely needs more."""
+
+    raw = _local_env("SMART_HOME_SPEAKER_THREADS")
+    if raw.strip().isdigit() and int(raw.strip()) > 0:
+        return int(raw.strip())
+    return 1
+
+
+def speaker_enrollment_samples() -> int:
+    """How many good utterances one enrolment needs.
+
+    Four is the floor at which a gallery can still reject a stranger; five leaves
+    room for one unusable recording without asking the user to start over.
+    """
+
+    raw = _local_env("SMART_HOME_SPEAKER_ENROLL_SAMPLES")
+    if raw.strip().isdigit() and int(raw.strip()) >= 4:
+        return int(raw.strip())
+    return DEFAULT_SPEAKER_ENROLL_SAMPLES
+
+
+# ------------------------------------------------------------------- barge-in
+# Talking over the assistant is normal in a household, so full interruption is on
+# by default. The known TTS waveform is used to reject a matching echo; the
+# loudness gate remains the fallback when that match is unreliable. A very quiet
+# microphone may need a lower floor, and acoustic echo cancellation is still not
+# available. `SMART_HOME_BARGE_IN=0` restores wake-word-only behaviour.
+DEFAULT_BARGE_IN_ENABLED = True
+DEFAULT_BARGE_MIN_SPEECH_SECONDS = 0.30
+DEFAULT_BARGE_MIN_RMS = 0.02
+DEFAULT_BARGE_ECHO_RATIO = 1.5
+DEFAULT_BARGE_ECHO_CALIBRATION_SECONDS = 0.6
+
+
+def _local_bool(name: str, fallback: bool) -> bool:
+    """Read a yes/no setting: environment first, then the local env file."""
+
+    raw = _local_env(name).strip().lower()
+    if not raw:
+        return fallback
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return fallback
+
+
+def barge_in_enabled() -> bool:
+    return _local_bool("SMART_HOME_BARGE_IN", DEFAULT_BARGE_IN_ENABLED)
+
+
+def barge_min_speech_seconds() -> float:
+    """How long the user must keep talking before a reply is cut off."""
+
+    return _speaker_float("SMART_HOME_BARGE_MIN_SPEECH", DEFAULT_BARGE_MIN_SPEECH_SECONDS)
+
+
+def barge_min_rms() -> float:
+    """Absolute loudness floor, so room noise alone never interrupts."""
+
+    return _speaker_float("SMART_HOME_BARGE_MIN_RMS", DEFAULT_BARGE_MIN_RMS)
+
+
+def barge_echo_ratio() -> float:
+    """How much louder than the reply's own leakage the user must be."""
+
+    return _speaker_float("SMART_HOME_BARGE_ECHO_RATIO", DEFAULT_BARGE_ECHO_RATIO)
+
+
+def barge_echo_calibration_seconds() -> float:
+    """Head of each reply used to measure leakage; it cannot be interrupted."""
+
+    return _speaker_float("SMART_HOME_BARGE_ECHO_CALIBRATION", DEFAULT_BARGE_ECHO_CALIBRATION_SECONDS)

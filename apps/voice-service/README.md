@@ -73,6 +73,49 @@ therefore behave identically, and a made-up 22 °C can no longer reach the devic
 The spoken sentence for an adjust comes from the service, because the model
 tended to narrate "turned it on at 26" as "lowered one step".
 
+When a command such as “空调调高一度” omits the room, the current utterance's
+confirmed voiceprint is joined to a fresh camera location. The local resolver
+selects the unique AC in that room and speaks the room name in its confirmation.
+If the speaker, location, or device is uncertain, it asks for the room. An
+explicitly named room always takes priority. This target decision is made by
+local code, not by the chat model.
+
+Two things keep this from turning into “which room did you mean?”:
+
+- The room the resolver found is written into that turn's prompt as
+  `本轮可信定位：说话人在卧室（0.8 秒前的摄像头观察）…`, with the instruction to act
+  on `target: "self"` instead of asking. When the location is missing, the same
+  line says so and names the reason, so the model asks only when there is
+  genuinely nothing to act on.
+- The most ordinary room-less imperatives (开灯 / 关灯 / 开空调 / 关空调 /
+  空调调高一度 and their common variants) are executed by local code with no
+  model call at all. Anything naming a room or a specific lamp ("打开客厅灯",
+  "开台灯"), a negation, or a second clause still goes to the model.
+
+### Interrupting a spoken reply
+
+You can talk over the assistant. Sustained speech stops the current reply, and what
+you said is kept and used as the next command — “空调调高一度” said over the reply is
+both the interruption and the instruction:
+
+- **While it is thinking** (waiting for the cloud model, or synthesizing): the
+  microphone is watched by a worker thread. Speech cancels the request, and the
+  reply that was being prepared is never played at all.
+- **While it is speaking**: detection is checked between 50 ms audio chunks. Once
+  confirmed, playback aborts its buffered output immediately; the captured portion
+  of your speech starts the next utterance. The wake word still interrupts too.
+- **Echo**: the known TTS waveform is aligned with microphone audio and a matching
+  copy is removed before VAD. This lets a quieter user speak over a louder reply in
+  the simulated case. If the waveform cannot be matched reliably, the detector
+  falls back to measuring leakage for `SMART_HOME_BARGE_ECHO_CALIBRATION` seconds
+  (0.6 s) and requiring `SMART_HOME_BARGE_ECHO_RATIO` (1.5×) more loudness. Speech
+  must last `SMART_HOME_BARGE_MIN_SPEECH` (0.3 s). In the fallback window, the
+  first 0.6 s cannot interrupt.
+- **Honest limits**: this is not full acoustic echo cancellation. Room reflections,
+  device sound effects and an unusually loud speaker can still hide an interruption;
+  a loud unrelated sound may stop playback. `SMART_HOME_BARGE_IN=0` restores
+  wake-word-only interruption. A real microphone and speaker check is still required.
+
 ### Ending the conversation
 
 The model decides when the user is done, through the `end_conversation` tool, and
@@ -128,6 +171,91 @@ Or set `SMART_HOME_AGENT=1` to enable the agent without the flag.
   bounded and cleared when the session returns to standby, so "再低一度" cannot
   leak across sessions.
 - Only the transcript text is uploaded; audio never leaves the machine.
+
+## Speaker identification (voiceprints, optional and off by default)
+
+Voiceprints exist for exactly two things: addressing the speaker as "你", and letting
+an omitted room default to the speaker's own camera-confirmed room. They are **not**
+used to decide whether an action is allowed — that is a static table in
+`src/agent_tools.py` (`TARGET_TIERS`), never a model's judgement — and they never
+provide a location: position always comes from the camera.
+
+Nothing here is active until a model file is configured, so an un-enrolled household
+behaves exactly as before.
+
+**Prerequisites: one model file, no new install**
+
+`sherpa-onnx` is already a dependency of this service, and sherpa-onnx runs the
+feature frontend (fbank) internally, so `speaker.py` hands it a raw 16 kHz waveform.
+Nothing needs `pip install`, and no model is ever downloaded automatically — a
+missing file is reported as `speaker_model_missing`.
+
+Download one Chinese 16 kHz speaker-embedding model. These live in the upstream
+`sherpa-recongition-models` release (the tag really is spelled that way):
+
+```powershell
+# In E:\smart-home — pick ONE. Sizes are for choosing between CPU latency and capacity.
+$model = "3dspeaker_speech_eres2net_base_200k_sv_zh-cn_16k-common.onnx"   # 37.8 MB, recommended start
+# $model = "3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"           # 27.0 MB, fastest
+# $model = "3dspeaker_speech_eres2net_large_sv_zh-cn_3dspeaker_16k.onnx"  # 110.7 MB, largest ERes2Net
+
+$dest = "D:\smart-home-models\$model"
+Invoke-WebRequest `
+  -Uri "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/$model" `
+  -OutFile $dest
+"downloaded: $((Get-Item $dest).Length / 1MB) MB -> $dest"
+```
+
+Then point the service at it. Either export it in the shell that launches the service,
+or — better, because it survives a restart — put it in the Git-ignored local env file
+`runtime/voice-agent/agent.env`, which this service already reads for its LLM key:
+
+```powershell
+# In E:\smart-home: append the model path to the local env file
+Add-Content -Encoding UTF8 runtime\voice-agent\agent.env `
+  "SMART_HOME_SPEAKER_MODEL=D:/smart-home-models/3dspeaker_speech_eres2net_base_200k_sv_zh-cn_16k-common.onnx"
+```
+
+Every speaker setting below can live in that file. A real environment variable always
+wins over the file.
+
+All six Chinese models in that release are `zh-cn` + `16 kHz`. Do **not** use the
+`en` (English) models for Chinese speech. Swap models freely — it is one variable —
+but re-measure after swapping, because the threshold depends on the model.
+
+**Configuration** (all optional; the defaults are shown)
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `SMART_HOME_SPEAKER_MODEL` | unset | Path to the model. Unset turns the feature off entirely. |
+| `SMART_HOME_VISION_URL` | `http://127.0.0.1:8766` | The gallery owner; matching never happens locally. |
+| `SMART_HOME_SPEAKER_MIN_SECONDS` | `1.5` | Shorter utterances are refused rather than guessed at. |
+| `SMART_HOME_SPEAKER_MATCH_THRESHOLD` | `0.55` | Below this the result is `uncertain` **and the name is discarded**. |
+| `SMART_HOME_SPEAKER_MARGIN_THRESHOLD` | `0.08` | Two people scoring this close together are not guessed between. |
+| `SMART_HOME_SPEAKER_PROVIDER` | `cpu` | `cpu` or `cuda` (CUDA needs a CUDA-enabled sherpa build). |
+| `SMART_HOME_SPEAKER_THREADS` | `1` | Threads for one embedding. |
+| `SMART_HOME_SPEAKER_ENROLL_SAMPLES` | `5` | Accepted utterances required per enrolment (minimum 4). |
+
+The two galleries live side by side under `runtime/vision/`, both DPAPI-encrypted for
+the current Windows user: `face_registry.bin` and `speaker_registry.bin`. Voiceprints
+never leave the machine, exactly like faces, and every enrolled embedding is bound to
+a `person_id` from the same directory the faces use, so "the dad in the face gallery"
+and "the dad in the voice gallery" are the same person by construction.
+
+**Measure before trusting it.** Run the measurement harness on your own voices and
+microphone, because the threshold in the table above is only a starting point:
+
+```powershell
+# Put at least two people's recordings in <root>/<person_id>/*.wav,
+# with at least 100 impostor trials before believing a 1% target.
+.\.venv\Scripts\python.exe tools/voice-check/measure_speaker.py `
+  --samples runtime/voice-eval `
+  --model D:/smart-home-models/3dspeaker_speech_eres2net_base_200k_sv_zh-cn_16k-common.onnx `
+  --out docs/superpowers/notes/2026-09-25-speaker-far-report.md
+```
+
+The report gives EER, FAR and FRR overall and bucketed by utterance length. It needs
+the model and real recordings, so a person runs it; it never touches device control.
 
 ## Environment
 
@@ -335,5 +463,11 @@ not call a cloud LLM and cannot control devices.
 .\.venv\Scripts\python.exe -m pytest apps/voice-service/tests -q
 .\.venv\Scripts\python.exe -m compileall -q apps/voice-service/src tools/voice-check
 ```
+
+`tests/test_barge_in.py` covers sustained speech, known-waveform echo rejection,
+the fallback calibration window, and the pre-roll that must not reach ASR. Startup
+and buffered-output abort are covered by `test_loop.py` and `test_playback.py`.
+These scripted checks cannot prove how your own speakers and microphone interact;
+the real check above is still required.
 
 Audio, model weights, logs and `.venv` are ignored by git.

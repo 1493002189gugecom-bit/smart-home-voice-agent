@@ -65,6 +65,8 @@ service dependencies (the model files themselves remain outside the repository):
 ## Launch order
 
 Order matters, because home-service owns the shared token this service reads.
+For normal use, `tools\start-perception.ps1` handles this order. The commands
+below are for starting individual services while diagnosing them.
 
 ```powershell
 # 1) home-service creates runtime/vision/home-service.token when it starts
@@ -109,6 +111,14 @@ JSON bodies must be objects with exactly the documented keys; a typo returns
 | GET | `/registration` | — |
 | POST | `/registration/cancel` | `{}` |
 | DELETE | `/registration/{person_id}` | — |
+
+`/health` separates HTTP availability from `model_ready`, `mode`, `error_code`
+and `last_frame_at_ms`. Both `/health` and `/config` expose `actual_mode`, measured
+from received frame width/height and a rolling frame rate; it is `null` before
+the first frame of a new camera. A successful HTTP response alone does not mean
+monitoring has live frames. `/registration` includes per-session
+`rejection_counts` by stable quality reason; these are frame counts held in
+memory, not images or biometric data.
 
 Status codes: `409` for an invalid mode transition, `422` for an invalid source,
 room, or person, `503` when models or the camera are unavailable, `404` for an

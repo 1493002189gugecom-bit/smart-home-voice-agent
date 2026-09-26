@@ -1,5 +1,14 @@
 # Home Assistant Closed-Loop Completion Implementation Plan
 
+> **已完成：计划 2026-09-13，完成 2026-09-13（当天实现并验收）。** 下面所有任务均已实现并通过
+> 验收，证据见 [`reports/2026-09-13-ha-closed-loop-report.md`](../../reports/2026-09-13-ha-closed-loop-report.md)
+> （301 单测 + 真实栈 14/14）。复选框按本项目惯例保持未勾选：只有真人复核后才勾。
+> 本文件所在目录 `plans/completed/` 即“已完成”集合；它取代并废弃了
+> `plans/2026-09-12-virtual-devices-implementation.md`（该文件已于 2026-09-25 删除，
+> 内容在 Git 历史里；其四设备范围后来被
+> [`specs/2026-09-17-ha-unity-realtime-effects-design.md`](../../specs/2026-09-17-ha-unity-realtime-effects-design.md)
+> 扩到八设备）。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build four MQTT virtual devices that Home Assistant discovers and that `home-service` controls through a persistent idempotent state machine with observed-state confirmation and crash recovery.

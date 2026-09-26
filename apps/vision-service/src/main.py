@@ -9,6 +9,7 @@ show a specific reason instead of a connection error.
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import json
 import sys
 from pathlib import Path
@@ -41,6 +42,16 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(config.public_view(), ensure_ascii=False, indent=2))
         return 0
 
+    # Native camera/ONNX faults bypass Python exception handlers. Preserve only
+    # stack traces (no local values, frames, or embeddings) for the next diagnosis.
+    fault_log = None
+    try:
+        config.runtime_dir.mkdir(parents=True, exist_ok=True)
+        fault_log = (config.runtime_dir / "native-fault.log").open("a", encoding="utf-8")
+        faulthandler.enable(file=fault_log, all_threads=True)
+    except OSError:
+        print("warning: native fault diagnostics are unavailable")
+
     runtime = VisionRuntime(config)
     runtime.load_models()
     runtime.start_worker()
@@ -49,6 +60,9 @@ def main(argv: list[str] | None = None) -> int:
         server = create_server(runtime, config.host, config.port)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
+        if fault_log is not None:
+            faulthandler.disable()
+            fault_log.close()
         return 2
 
     print(f"vision-service listening on http://{config.host}:{config.port} (loopback only)")
@@ -73,6 +87,9 @@ def main(argv: list[str] | None = None) -> int:
         # One bounded offline notification, then release the camera even if
         # home-service is unreachable.
         runtime.shutdown()
+        if fault_log is not None:
+            faulthandler.disable()
+            fault_log.close()
     return 0
 
 

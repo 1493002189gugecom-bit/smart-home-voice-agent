@@ -89,7 +89,7 @@ class ToolService:
                     "id": item.id,
                     "name": item.name,
                     "simulated_temp": item.simulated_temp,
-                    "version": observed.get("version", item.version),
+                    "version": item.version,
                     "devices": devices,
                 }
             )

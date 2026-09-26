@@ -41,12 +41,39 @@ class VoiceEventBus:
         self._sequence = 0
         self.state = "starting"
         self.health_summary: dict[str, Any] = {}
+        self._selection_status: dict[str, Any] | None = None
+
+    def set_selection_status(self, request_id: str, state: str, error_code: str | None = None) -> None:
+        with self._lock:
+            self._selection_status = {
+                "request_id": request_id,
+                "state": state,
+                "error_code": error_code,
+            }
+
+    def selection_status(self) -> dict[str, Any] | None:
+        with self._lock:
+            return deepcopy(self._selection_status)
 
     def publish(self, event_type: str, **payload: Any) -> dict[str, Any]:
+        return self._emit(event_type, payload, durable=True)
+
+    def publish_transient(self, event_type: str, **payload: Any) -> dict[str, Any]:
+        """Fan out to live subscribers without entering the bounded history.
+
+        Streaming deltas arrive many times per spoken sentence; storing them in a
+        200-event history would evict the very conversation the console is
+        showing. The finished sentence is published durably by `publish`.
+        """
+        return self._emit(event_type, payload, durable=False)
+
+    def _emit(self, event_type: str, payload: dict[str, Any], *, durable: bool) -> dict[str, Any]:
         with self._lock:
             self._sequence += 1
             state = payload.get("state")
-            if isinstance(state, str) and state:
+            # Only durable events define the machine state; a half-typed sentence
+            # must never move the loop out of whatever it is really doing.
+            if durable and isinstance(state, str) and state:
                 self.state = state
             event = {
                 "id": self._sequence,
@@ -54,7 +81,8 @@ class VoiceEventBus:
                 "type": str(event_type),
                 "payload": _public(payload),
             }
-            self._events.append(event)
+            if durable:
+                self._events.append(event)
             for subscriber in tuple(self._subscribers):
                 try:
                     subscriber.put_nowait(event)

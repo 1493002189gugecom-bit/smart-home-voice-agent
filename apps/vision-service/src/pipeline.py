@@ -16,9 +16,15 @@ from __future__ import annotations
 
 import threading
 import time
+import traceback
+import sys
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from diagnostics import DiagnosticWriter
 
 from capture import CaptureSession, CameraSource
 from config import VisionConfig
@@ -40,10 +46,30 @@ from home_client import HomeSyncClient
 from pose import PoseStateMachine, PoseTracker
 from registration import RegistrationSession
 from registry import FaceRegistry
+from speaker_registry import SpeakerRegistry
 
 # Longest edge of the preview JPEG. Small enough to stream at ~1 Hz, large enough
 # to read a name and a pose label.
 PREVIEW_MAX_EDGE = 960
+MAX_CONSECUTIVE_FRAME_ERRORS = 3
+DIAGNOSTICS = DiagnosticWriter(component="vision")
+
+
+def _safe_error_code(error: Exception, default: str) -> str:
+    """Keep native numeric error codes out of the public service status."""
+    code = getattr(error, "code", None)
+    return code if isinstance(code, str) and code else default
+
+
+def _failure_location(error: Exception) -> dict[str, str | int]:
+    """Expose a traceback location without exception text, paths, or frame data."""
+    source_dir = Path(__file__).resolve().parent
+    frames = traceback.extract_tb(error.__traceback__)
+    for frame in reversed(frames):
+        if Path(frame.filename).resolve().parent == source_dir:
+            return {"type": type(error).__name__, "module": Path(frame.filename).name,
+                    "function": frame.name, "line": frame.lineno}
+    return {"type": type(error).__name__, "module": "external", "function": "unknown", "line": 0}
 
 
 @dataclass
@@ -148,6 +174,7 @@ class VisionRuntime:
         self.source: CameraSource | None = None
         self.error_code: str | None = None
         self.message: str | None = None
+        self._last_failure: dict[str, str | int] | None = None
 
         self._lock = threading.RLock()
         self._published = _Published(
@@ -166,6 +193,10 @@ class VisionRuntime:
         self.pose_states = PoseStateMachine(config)
         self.faces = FaceEngine(config)
         self.registry = FaceRegistry(config.runtime_dir, config.insightface_pack)
+        # Voiceprints are stored here rather than in voice-service because this is
+        # where the only DPAPI implementation lives; the voice service computes the
+        # embeddings and hands them over loopback.
+        self.speaker_registry = SpeakerRegistry(config.runtime_dir, config.speaker_pack)
         self.identity = IdentityStabilizer(config)
         self.sync = HomeSyncClient(config.home_service_url, config.runtime_dir)
         self.registration: RegistrationSession | None = None
@@ -187,7 +218,7 @@ class VisionRuntime:
             if isinstance(exc, (FileNotFoundError, FaceModelMissing)):
                 self._model_error = "model_missing"
             else:
-                self._model_error = getattr(exc, "code", None) or "model_error"
+                self._model_error = _safe_error_code(exc, "model_error")
             self._set_mode(ServiceMode.ERROR, self._model_error)
             return
         self._model_ready = True
@@ -198,7 +229,7 @@ class VisionRuntime:
         except Exception as exc:  # noqa: BLE001 - a bad registry must not disable vision
             # Pose and detection keep working; nobody can be recognised until the
             # user registers again, and the panel can say exactly that.
-            self._registry_error = getattr(exc, "code", None) or type(exc).__name__
+            self._registry_error = _safe_error_code(exc, type(exc).__name__)
 
     def start_worker(self) -> None:
         # Start the publisher first so the first processed frame cannot be lost
@@ -360,9 +391,12 @@ class VisionRuntime:
                 "camera_id": self.source.redacted_label if self.source else None,
                 "camera_room_id": self.camera_room_id,
                 "session_id": self.capture.session_id,
+                "last_frame_at_ms": self.capture.last_frame_at_ms,
+                "actual_mode": self.capture.actual_mode,
                 "sync_state": self.sync.sync_state,
                 "error_code": self.error_code,
                 "message": self.message,
+                "last_failure": dict(self._last_failure) if self._last_failure else None,
             }
 
     # ------------------------------------------------------------- internals
@@ -420,10 +454,12 @@ class VisionRuntime:
     def _on_capture_status(self, state: str, camera_id: str | None) -> None:
         if state == "camera_open_failed":
             self._abort_registration("camera_open_failed")
+            self.sync.mark_not_monitoring()
             self._set_mode(ServiceMode.ERROR, "camera_open_failed")
         elif state == "camera_disconnected":
             self._offline_current("camera_disconnected")
             self._abort_registration("camera_disconnected")
+            self.sync.mark_not_monitoring()
             self._set_mode(ServiceMode.ERROR, "camera_disconnected")
 
     def _abort_registration(self, reason: str) -> None:
@@ -442,18 +478,43 @@ class VisionRuntime:
             self._set_mode(ServiceMode.IDLE)
 
     def _run(self) -> None:
+        consecutive_errors = 0
         while not self._stop.is_set():
             frame = self.capture.latest_frame.take(timeout=0.5)
             if frame is None:
                 continue
+            session_id = self.capture.session_id
             try:
                 self._process(frame)
+                consecutive_errors = 0
+                with self._lock:
+                    self._last_failure = None
             except Exception as exc:  # noqa: BLE001 - one bad frame must not kill the loop
-                self._offline_current("model_error")
-                # A model fault must end enrolment too, or `/registration` keeps
+                if session_id:
+                    captured_at_ms = getattr(frame, "captured_at_ms", None)
+                    DIAGNOSTICS.emit("frame", outcome="error",
+                                     observation_id=f"{session_id}:{captured_at_ms}" if isinstance(captured_at_ms, int) else None,
+                                     error_code="frame_processing_error")
+                # An in-flight frame can fail while a control request switches the
+                # source. Never let that old frame poison the new session.
+                if self.capture.session_id != session_id or self.mode not in (
+                    ServiceMode.MONITORING, ServiceMode.REGISTERING
+                ):
+                    consecutive_errors = 0
+                    continue
+                with self._lock:
+                    self._last_failure = _failure_location(exc)
+                consecutive_errors += 1
+                if consecutive_errors < MAX_CONSECUTIVE_FRAME_ERRORS:
+                    continue
+                self._offline_current("frame_processing_error")
+                # A persistent processing fault must end enrolment too, or `/registration` keeps
                 # reporting progress that can never advance.
-                self._abort_registration("model_error")
-                self._set_mode(ServiceMode.ERROR, getattr(exc, "code", None) or "model_error")
+                self._abort_registration("frame_processing_error")
+                self.capture.stop("frame_processing_error")
+                self.sync.mark_not_monitoring()
+                self._set_mode(ServiceMode.ERROR, _safe_error_code(exc, "frame_processing_error"))
+                consecutive_errors = 0
 
     def _process(self, frame) -> None:
         if self.mode == ServiceMode.REGISTERING:
@@ -463,12 +524,24 @@ class VisionRuntime:
             return
 
         session_id = self.capture.session_id or ""
+        started = time.perf_counter()
         bodies: list[BodyTrack] = self.pose.process(frame, session_id)
+        pose_ms = (time.perf_counter() - started) * 1000
         self._frame_index += 1
+        measure = self._frame_index % 30 == 0
+        observation_id = f"{session_id}:{frame.captured_at_ms}"
+        if measure:
+            DIAGNOSTICS.emit("capture_age", observation_id=observation_id,
+                             duration_ms=max(0, int(time.time() * 1000) - frame.captured_at_ms))
+            DIAGNOSTICS.emit("pose", observation_id=observation_id, duration_ms=pose_ms)
 
         face_map: dict[str, FaceSample] = {}
         if self._frame_index % max(1, int(self.config.face_review_interval_frames)) == 0:
+            face_started = time.perf_counter()
             self._last_faces = self.faces.analyze(frame.frame_bgr)
+            if measure:
+                DIAGNOSTICS.emit("face", observation_id=observation_id,
+                                 duration_ms=(time.perf_counter() - face_started) * 1000)
             if self._last_faces:
                 face_map = associate_faces(self._last_faces, bodies)
 
@@ -487,18 +560,29 @@ class VisionRuntime:
         # cannot publish after a pause or session replacement.
         if self.mode != ServiceMode.MONITORING or self.capture.session_id != session_id:
             return
+        render_started = time.perf_counter()
         self._publish(observations, frame)
+        if measure:
+            DIAGNOSTICS.emit("render", observation_id=observation_id,
+                             duration_ms=(time.perf_counter() - render_started) * 1000)
         self._push_to_home(frame)
+        if measure:
+            DIAGNOSTICS.emit("frame", observation_id=observation_id,
+                             duration_ms=(time.perf_counter() - started) * 1000)
 
     def _process_registration(self, frame) -> None:
         session = self.registration
         if session is None:
             return
         session_id = self.capture.session_id
+        observation_id = f"{session_id}:{frame.captured_at_ms}" if session_id else None
+        frame_started = time.perf_counter()
         # Publish the live frame before face inference.  Registration can spend
         # noticeable time in the model on its first frame; waiting for it made
         # Unity replace the previous image with a black/empty transition.
         preview_jpeg = self._render_preview(frame.frame_bgr, [])
+        DIAGNOSTICS.emit("registration_preview", observation_id=observation_id,
+                         duration_ms=(time.perf_counter() - frame_started) * 1000)
         with self._lock:
             if (
                 self.mode != ServiceMode.REGISTERING
@@ -510,8 +594,16 @@ class VisionRuntime:
                 snapshot=self._published.snapshot,
                 preview_jpeg=preview_jpeg,
             )
+        face_started = time.perf_counter()
         faces = self.faces.analyze(frame.frame_bgr)
+        DIAGNOSTICS.emit("registration_face", observation_id=observation_id,
+                         duration_ms=(time.perf_counter() - face_started) * 1000)
+        accept_started = time.perf_counter()
         session.accept(frame.frame_bgr, faces, frame.captured_at_ms)
+        DIAGNOSTICS.emit("registration_accept", observation_id=observation_id,
+                         duration_ms=(time.perf_counter() - accept_started) * 1000)
+        DIAGNOSTICS.emit("registration_frame", observation_id=observation_id,
+                         duration_ms=(time.perf_counter() - frame_started) * 1000)
         if session.finished():
             # RegistrationSession already performed the one atomic registry
             # replacement before confirmation. Keep the terminal session so the
@@ -614,21 +706,26 @@ class VisionRuntime:
         })
 
     def _render_preview(self, frame_bgr, observations: list[TrackObservation]) -> bytes | None:
-        """Draw the overlay on a copy; raw frames are never written to disk."""
+        """Mirror the preview for the person facing the screen, then draw readable overlays.
+
+        Recognition and world-location coordinates stay in the original camera frame.
+        Raw frames are never written to disk.
+        """
         try:
             import cv2
         except ImportError:
             return None
-        canvas = frame_bgr.copy()
+        canvas = cv2.flip(frame_bgr, 1)
         height, width = canvas.shape[:2]
         for track in observations:
             x1, y1, x2, y2 = (
                 int(track.bbox[0] * width), int(track.bbox[1] * height),
                 int(track.bbox[2] * width), int(track.bbox[3] * height),
             )
-            cv2.rectangle(canvas, (x1, y1), (x2, y2), (60, 200, 190), 2)
+            mirrored_x1, mirrored_x2 = width - x2, width - x1
+            cv2.rectangle(canvas, (mirrored_x1, y1), (mirrored_x2, y2), (60, 200, 190), 2)
             label = _track_label(track)
-            cv2.putText(canvas, label, (x1, max(12, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            cv2.putText(canvas, label, (mirrored_x1, max(12, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         longest = max(height, width)
         if longest > PREVIEW_MAX_EDGE:
             scale = PREVIEW_MAX_EDGE / float(longest)
@@ -651,6 +748,7 @@ def _track_label(track: TrackObservation) -> str:
 _ERROR_MESSAGES = {
     "model_missing": "模型文件缺失，请先按 README 放置本地模型",
     "model_error": "模型推理异常，已停止发布视觉状态",
+    "frame_processing_error": "连续处理画面失败，已停止视觉监控；请查看故障位置",
     "camera_open_failed": "摄像头打开失败",
     "camera_disconnected": "摄像头已断开",
     "camera_not_selected": "尚未选择摄像头",

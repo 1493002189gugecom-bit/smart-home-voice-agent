@@ -11,6 +11,9 @@ import pytest
 
 from ha_gateway import GatewayError, HAGateway
 from ha_service import HAServiceApp, load_catalog, normalize_entity
+from service_paths import CONFIG
+from state import build_default_state
+from vision_fixtures import build_store
 
 
 CATALOG_PATH = Path(__file__).parents[1] / "config" / "ha_entities.json"
@@ -456,6 +459,33 @@ def test_ac_mode_and_temperature_are_submitted_and_confirmed(tmp_path):
     ]
 
 
+def test_explicit_relative_ac_change_uses_current_target_and_spoken_degrees(tmp_path):
+    gateway = FakeGateway()
+    gateway.items["climate.shv_bedroom_ac"]["state"] = "cool"
+    gateway.items["climate.shv_bedroom_ac"]["attributes"]["temperature"] = 26.5
+    result = post(make_app(tmp_path, gateway), "/tool/adjust_ac", {
+        "device_id": "bedroom_ac", "direction": "cooler", "degrees": 2,
+        "operation_id": "ac-relative-two",
+    })[1]
+    assert result["ok"] is True
+    assert result["data"]["state"]["target_temp"] == 24.5
+    assert gateway.calls == [("climate", "set_temperature", {
+        "entity_id": "climate.shv_bedroom_ac", "temperature": 24.5,
+    })]
+
+
+@pytest.mark.parametrize("degrees", [0, -2, True, float("inf"), 20])
+def test_explicit_relative_ac_change_rejects_invalid_degrees(tmp_path, degrees):
+    gateway = FakeGateway()
+    status, result = post(make_app(tmp_path, gateway), "/tool/adjust_ac", {
+        "device_id": "bedroom_ac", "direction": "cooler", "degrees": degrees,
+        "operation_id": "ac-relative-invalid",
+    })
+    assert status == 400
+    assert result["error_code"] == "invalid_request"
+    assert gateway.calls == []
+
+
 def test_ac_on_defaults_to_cool_at_the_local_comfort_temperature(tmp_path):
     """No temperature in the request means the *local* default is used, so the
     model never has to invent one."""
@@ -581,7 +611,6 @@ def test_unconfirmed_recovery_only_reconciles_and_can_later_confirm(tmp_path):
 def test_ha_mode_space_and_test_mutation_routes_are_404(tmp_path):
     app = make_app(tmp_path, FakeGateway())
     for method, path in (
-        ("GET", "/tool/person_location"),
         ("POST", "/tool/notify"),
         ("POST", "/tool/broadcast"),
         ("POST", "/test/device_online"),
@@ -590,3 +619,70 @@ def test_ha_mode_space_and_test_mutation_routes_are_404(tmp_path):
         status, result = app.handle(method, path, {}, {})
         assert status == 404
         assert result["ok"] is False
+
+
+# ------------------------------------------------- camera-owned person state
+def test_person_location_reads_the_camera_store_in_ha_mode(tmp_path):
+    """Regression: the voice agent offers `query_person_location` whichever
+    backend is active, but only the memory backend served the route. In HA mode
+    the tool therefore always failed and the assistant had to admit it could not
+    see anyone, even while the camera was reporting a confirmed location."""
+    app = make_app(tmp_path, FakeGateway())
+    app.visual_state = build_store(build_default_state(CONFIG), {"bedroom": ["dad"]})
+
+    status, payload = get(app, "/tool/person_location", person="爸爸")
+
+    assert status == 200
+    assert payload["error_code"] is None
+    person = payload["data"]["persons"][0]
+    assert person["id"] == "dad"
+    assert person["location_known"] is True
+    assert person["room_id"] == "bedroom"
+    assert person["room_name"] == "卧室"
+    assert person["location_source"] == "camera"
+
+
+def test_person_location_lists_everyone_when_no_name_is_given(tmp_path):
+    app = make_app(tmp_path, FakeGateway())
+    app.visual_state = build_store(build_default_state(CONFIG), {"bedroom": ["dad"]})
+
+    status, payload = get(app, "/tool/person_location")
+
+    assert status == 200
+    names = {item["display_name"]: item["location_known"] for item in payload["data"]["persons"]}
+    assert names["爸爸"] is True
+    assert names["妈妈"] is False
+
+
+def test_unseen_people_never_report_a_room(tmp_path):
+    """An expired observation means "not seen", not "still in the old room"."""
+    app = make_app(tmp_path, FakeGateway())
+    app.visual_state = build_store(build_default_state(CONFIG), {})
+
+    status, payload = get(app, "/tool/person_location")
+
+    assert status == 200
+    for person in payload["data"]["persons"]:
+        assert person["location_known"] is False
+        assert person["room_id"] is None
+        assert person["room_name"] is None
+        assert person["pose"] == "unknown"
+
+
+def test_unknown_person_name_is_not_found(tmp_path):
+    app = make_app(tmp_path, FakeGateway())
+    app.visual_state = build_store(build_default_state(CONFIG), {"bedroom": ["dad"]})
+
+    status, payload = get(app, "/tool/person_location", person="隔壁老王")
+
+    assert status == 400
+    assert payload["ok"] is False
+
+
+def test_person_location_without_a_store_is_reported_not_invented(tmp_path):
+    app = make_app(tmp_path, FakeGateway())
+
+    status, payload = get(app, "/tool/person_location")
+
+    assert status == 400
+    assert payload["ok"] is False

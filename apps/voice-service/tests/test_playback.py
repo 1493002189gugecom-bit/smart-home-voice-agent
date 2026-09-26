@@ -89,3 +89,72 @@ def test_playback_target_describe_includes_rate_and_channels():
     target = PlaybackTarget(device=device(24, "Windows WASAPI"), sample_rate=48000, channels=2)
     text = target.describe()
     assert "48000" in text and "x2" in text and "WASAPI" in text
+
+
+def test_play_interrupt_aborts_buffered_audio_before_closing_stream(monkeypatch):
+    writes = []
+    streams = []
+    events = []
+
+    class FakeStream:
+        latency = 0.01
+
+        def __init__(self, **kwargs):
+            streams.append(self)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            self.stop()
+            self.closed = True
+
+        def write(self, frames):
+            writes.append(len(frames))
+
+        def abort(self):
+            events.append("abort")
+
+        def stop(self):
+            events.append("stop")
+
+    monkeypatch.setattr(playback.sd, "OutputStream", FakeStream)
+    target = PlaybackTarget(device=device(24, "Windows WASAPI"), sample_rate=1000, channels=2)
+    completed = playback.play(
+        np.ones(1000, dtype=np.float32), 1000, target,
+        chunk_seconds=0.1, should_interrupt=lambda: len(writes) >= 2,
+    )
+    assert completed is False
+    assert writes == [100, 100]
+    assert events == ["abort", "stop"]
+    assert streams[0].closed
+
+
+def test_play_reports_completion_and_stream_latency(monkeypatch):
+    writes = []
+    started = []
+
+    class FakeStream:
+        latency = 0.02
+
+        def __init__(self, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def write(self, frames):
+            writes.append(len(frames))
+
+    monkeypatch.setattr(playback.sd, "OutputStream", FakeStream)
+    monkeypatch.setattr(playback.time, "sleep", lambda _: None)
+    target = PlaybackTarget(device=device(24, "Windows WASAPI"), sample_rate=1000, channels=2)
+    assert playback.play(
+        np.ones(250, dtype=np.float32), 1000, target, drain_seconds=0,
+        chunk_seconds=0.1, on_stream_started=started.append,
+    ) is True
+    assert writes == [100, 100, 50]
+    assert started == [0.02]

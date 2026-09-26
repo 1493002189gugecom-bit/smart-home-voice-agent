@@ -10,15 +10,22 @@ from __future__ import annotations
 
 import json
 import time
+import urllib.request
+import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlparse
 
-from capture import CameraSource, enumerate_cameras
-from contracts import KNOWN_PERSON_IDS, KNOWN_ROOM_IDS, ServiceMode
+from capture import CameraSource
+from contracts import KNOWN_PERSON_IDS, KNOWN_ROOM_IDS, ServiceMode, valid_person_id
 from pipeline import VisionRuntime
+from registry import RegistryError
 
 JSON_CACHE_CONTROL = "no-store"
+
+# Ceiling for one speaker embedding. Generous for any current model (192-512
+# dimensions) while still refusing an absurd allocation from a request body.
+MAX_EMBEDDING_DIM = 2048
 
 
 class VisionRequestError(Exception):
@@ -74,9 +81,51 @@ def registration_person(body: Any) -> str:
     payload = _require_object(body)
     _require_exact_keys(payload, {"person_id"})
     person_id = payload.get("person_id")
-    if person_id not in KNOWN_PERSON_IDS:
-        raise VisionRequestError(422, "invalid_person", "person_id 必须是 dad、mom 或 child")
+    if not valid_person_id(person_id):
+        raise VisionRequestError(422, "invalid_person", "人物编号无效")
     return str(person_id)
+
+
+def _speaker_vectors(raw: Any) -> list[tuple[float, ...]]:
+    """Shape-check voiceprint vectors; the registry owns the numeric rules.
+
+    Finiteness and zero-norm rejection already live in the registry's own
+    normalisation, so a bad vector surfaces as a 422 there rather than being
+    validated twice with two chances to disagree.
+    """
+
+    if not isinstance(raw, list) or not raw:
+        raise VisionRequestError(422, "invalid_embedding", "声纹向量必须是非空数组")
+    vectors: list[tuple[float, ...]] = []
+    for item in raw:
+        if not isinstance(item, list) or not item or len(item) > MAX_EMBEDDING_DIM:
+            raise VisionRequestError(422, "invalid_embedding", "每个声纹向量必须是定长数字数组")
+        values: list[float] = []
+        for value in item:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise VisionRequestError(422, "invalid_embedding", "声纹向量只能包含数字")
+            values.append(float(value))
+        vectors.append(tuple(values))
+    return vectors
+
+
+def speaker_embeddings(body: Any) -> list[tuple[float, ...]]:
+    """Enrolment payload: several accepted samples for one utterance set."""
+
+    payload = _require_object(body)
+    _require_exact_keys(payload, {"person_id", "embeddings"})
+    person_id = payload.get("person_id")
+    if not valid_person_id(person_id):
+        raise VisionRequestError(422, "invalid_person", "人物编号无效")
+    return _speaker_vectors(payload.get("embeddings"))
+
+
+def speaker_query(body: Any) -> tuple[float, ...]:
+    """Match payload: exactly one vector, the utterance being identified."""
+
+    payload = _require_object(body)
+    _require_exact_keys(payload, {"embedding"})
+    return _speaker_vectors([payload.get("embedding")])[0]
 
 
 class VisionApp:
@@ -101,7 +150,11 @@ class VisionApp:
                 "model_ready": model_ready,
                 "model_error": status["model_error"],
                 "mode": status["mode"],
+                "camera_id": status["camera_id"],
                 "camera_room_id": status["camera_room_id"],
+                "last_frame_at_ms": status["last_frame_at_ms"],
+                "actual_mode": status["actual_mode"],
+                "error_code": status["error_code"],
                 "sync_state": status["sync_state"],
             }
 
@@ -126,17 +179,19 @@ class VisionApp:
                 "sync_state": status["sync_state"],
                 "model_state": model_state,
                 "camera_state": camera_state,
+                "actual_mode": status["actual_mode"],
                 "error_code": error_code,
                 "message": status["message"],
+                "last_failure": status.get("last_failure"),
                 "data": self.runtime.config.public_view(),
             }
 
         if method == "GET" and path == "/cameras":
             try:
-                cameras = enumerate_cameras()
+                cameras, scan_paused = self.runtime.capture.list_cameras()
             except ImportError:
                 raise VisionRequestError(503, "opencv_missing", "未安装 opencv，无法枚举摄像头")
-            return 200, {"ok": True, "data": {"cameras": cameras}}
+            return 200, {"ok": True, "data": {"cameras": cameras, "scan_paused": scan_paused}}
 
         if method == "POST" and path == "/camera/select":
             source = select_source(self.runtime, body)
@@ -158,7 +213,7 @@ class VisionApp:
             status = self.runtime.status()
             if self.runtime.mode == ServiceMode.ERROR:
                 code = status["error_code"] or "monitor_unavailable"
-                http_status = 503 if code in {"model_missing", "model_error", "camera_open_failed", "camera_disconnected"} else 409
+                http_status = 503 if code in {"model_missing", "model_error", "frame_processing_error", "camera_open_failed", "camera_disconnected"} else 409
                 return http_status, {"ok": False, "error_code": code, "message": status["message"]}
             return 200, {"ok": True, "mode": self.runtime.mode.value}
 
@@ -181,6 +236,14 @@ class VisionApp:
 
         if method == "POST" and path == "/registration/start":
             person_id = registration_person(body)
+            if person_id not in KNOWN_PERSON_IDS:
+                try:
+                    with urllib.request.urlopen(self.runtime.config.home_service_url.rstrip("/") + "/persons", timeout=3) as response:
+                        directory = json.load(response)
+                except (OSError, ValueError, urllib.error.URLError) as exc:
+                    raise VisionRequestError(503, "person_directory_unavailable", "人物名单暂不可用，请检查 home-service") from exc
+                if not any(item.get("id") == person_id for item in directory.get("persons", [])):
+                    raise VisionRequestError(422, "unknown_person", "请先在身份页添加该人物")
             if self.runtime.mode == ServiceMode.REGISTERING:
                 return 409, {"ok": False, "error_code": "registration_active", "message": "已有注册正在进行"}
             status = self.runtime.start_registration(person_id)
@@ -195,9 +258,13 @@ class VisionApp:
 
         if method == "GET" and path == "/registration":
             payload = self._registration_payload()
-            if payload is None:
-                raise VisionRequestError(404, "not_registered", "当前没有进行中的注册")
+            # No session is a normal idle state. Returning 404 makes clients
+            # back off polling just before the user starts a new registration.
             return 200, {"ok": True, "registration": payload}
+
+        if method == "GET" and path == "/registrations":
+            return 200, {"ok": True, "person_ids": self.runtime.registry.persons(),
+                         "persistent": self.runtime.registry.persistent}
 
         if method == "POST" and path == "/registration/cancel":
             _require_exact_keys(_require_object(body), set())
@@ -208,11 +275,58 @@ class VisionApp:
 
         if method == "DELETE" and path.startswith("/registration/"):
             person_id = path.rsplit("/", 1)[-1]
-            if person_id not in KNOWN_PERSON_IDS:
-                raise VisionRequestError(422, "invalid_person", "person_id 必须是 dad、mom 或 child")
+            if not valid_person_id(person_id):
+                raise VisionRequestError(422, "invalid_person", "人物编号无效")
             removed = self.runtime.delete_registration(person_id)
             if not removed:
                 return 404, {"ok": False, "error_code": "not_registered", "message": "该人物没有已保存的特征"}
+            return 200, {"ok": True, "person_id": person_id}
+
+        if method == "POST" and path == "/identity/speaker/enroll":
+            payload = _require_object(body)
+            vectors = speaker_embeddings(payload)
+            person_id = str(payload["person_id"])
+            try:
+                self.runtime.speaker_registry.replace(person_id, vectors)
+            except ValueError as exc:
+                raise VisionRequestError(422, "invalid_embedding", str(exc)) from exc
+            except RegistryError as exc:
+                raise VisionRequestError(503, "speaker_registry_unavailable", str(exc)) from exc
+            registry = self.runtime.speaker_registry
+            return 200, {
+                "ok": True,
+                "person_id": person_id,
+                "count": registry.counts().get(person_id, 0),
+                "persistent": registry.persistent,
+            }
+
+        if method == "POST" and path == "/identity/speaker/match":
+            candidate = self.runtime.speaker_registry.rank(speaker_query(body))[0]
+            return 200, {
+                "ok": True,
+                "candidate": {
+                    "person_id": candidate.person_id,
+                    "similarity": candidate.similarity,
+                    "margin": candidate.margin,
+                },
+            }
+
+        if method == "GET" and path == "/identity/speaker/status":
+            registry = self.runtime.speaker_registry
+            return 200, {
+                "ok": True,
+                "person_ids": registry.persons(),
+                "counts": registry.counts(),
+                "persistent": registry.persistent,
+                "pack": registry.pack,
+            }
+
+        if method == "DELETE" and path.startswith("/identity/speaker/"):
+            person_id = path.rsplit("/", 1)[-1]
+            if not valid_person_id(person_id):
+                raise VisionRequestError(422, "invalid_person", "人物编号无效")
+            if not self.runtime.speaker_registry.delete(person_id):
+                return 404, {"ok": False, "error_code": "not_registered", "message": "该人物没有已保存的声纹"}
             return 200, {"ok": True, "person_id": person_id}
 
         return 404, {"ok": False, "error_code": "not_found", "message": f"no route for {method} {path}"}

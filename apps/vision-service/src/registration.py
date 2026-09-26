@@ -17,9 +17,10 @@ untouched; a failed confirmation keeps the newly written record and reports
 from __future__ import annotations
 
 import math
+from collections import Counter
 
 from contracts import (
-    KNOWN_PERSON_IDS,
+    valid_person_id,
     FaceSample,
     RegistrationStatus,
 )
@@ -60,21 +61,20 @@ EYELID_MIN_LANDMARK_SCORE = 0.30
 YAW_TURN_RATIO = 0.18
 # Face-relative yaw inside which the head counts as facing the camera.
 YAW_FRONT_RATIO = 0.12
-# Eye-to-mouth distance divided by eye distance: larger means head pitched down.
-PITCH_DOWN_RATIO = 0.85
-# Eye-to-mouth distance divided by eye distance: smaller means head pitched up.
-PITCH_UP_RATIO = 0.62
-# Pitch range still counted as neutral for the `front` step.
+# Minimum change in the nose's eye-to-mouth position from the user's neutral
+# samples. Eye-to-mouth length alone shortens in BOTH directions when nodding.
+NOD_POSITION_CHANGE = 0.08
+# Pitch range still counted as neutral for the `front` step. The upper edge
+# includes the measured 16:9 live-camera face after aspect-ratio correction.
 PITCH_FRONT_MIN_RATIO = 0.66
-PITCH_FRONT_MAX_RATIO = 0.82
+PITCH_FRONT_MAX_RATIO = 1.10
 # Minimum score for each of the five landmarks used by the direction rules.
 DIRECTION_MIN_LANDMARK_SCORE = 0.40
-# InsightFace 106-landmark indices per eye: (outer corner, upper lid, inner
-# corner). The 106-point model orders the left eye as indices 33..42 and the
-# right eye as indices 87..96 with the upper lid in the middle of each run.
-# If that ordering ever differs, the ratio stays unusable and the step reports
-# `landmarks_incomplete` instead of accepting a wrong action.
-_EYELID_INDEX_PAIRS: tuple[tuple[int, int, int], ...] = ((35, 37, 33), (89, 91, 87))
+# InsightFace 2d106det contour order: corner, upper1, upper2, other corner,
+# lower2, lower1. Points 33/87 are lower eyelid centres, NOT eye corners.
+# Official markup linked from alignment/coordinate_reg/README.md:
+# https://github.com/nttstar/insightface-resources/blob/master/alignment/images/2d106markup.jpg
+_EYELID_CONTOURS = ((35, 41, 42, 39, 37, 36), (89, 95, 96, 93, 91, 90))
 # Session states reported through `RegistrationStatus.state`.
 STATE_COLLECTING = "collecting"
 STATE_CONFIRMING = "confirming"
@@ -169,14 +169,16 @@ class RegistrationSession:
         engine: FaceEngine | None = None,
         registry: FaceRegistry | None = None,
     ) -> None:
-        if person_id not in KNOWN_PERSON_IDS:
-            raise ValueError("person_id must be dad, mom, or child")
+        if not valid_person_id(person_id):
+            raise ValueError("person_id is invalid")
         self.person_id = person_id
         self.config = config
         self._engine = engine if engine is not None else FaceEngine(config)
         self._registry = registry
         self.prototypes_collected: list[tuple[float, ...]] = []
         self._step_embeddings: list[tuple[float, ...]] = []
+        self._neutral_nose_positions: list[float] = []
+        self._action_progress: float | None = None
         self._samples_in_step = 0
         self._blinks = 0
         self._blink = BlinkDetector()
@@ -186,6 +188,7 @@ class RegistrationSession:
         self._updated_at_ms = 0
         self._state = STATE_COLLECTING
         self._quality_reason: str | None = None
+        self._rejection_counts: Counter[str] = Counter()
         self._message: str | None = None
         self._confirmation_started_ms: int = 0
         self._confirmation_votes = 0
@@ -245,15 +248,18 @@ class RegistrationSession:
             return self._accept_blink(sample, at_ms)
 
         direction, ratios = self._head_direction(sample)
-        if direction is None:
+        nose_position = self._nose_position(sample)
+        if direction is None or nose_position is None:
             return self._reject("landmarks_incomplete", at_ms)
-        if not self._matches_step(direction, ratios):
+        if not self._matches_step(direction, ratios, nose_position):
             return self._reject("wrong_action", at_ms)
 
         embedding = sample.embedding
         if embedding is None:
             return self._reject(sample.quality.reason or "embedding_unavailable", at_ms)
         self._step_embeddings.append(tuple(float(value) for value in embedding))
+        if self.step == "front":
+            self._neutral_nose_positions.append(nose_position)
         self._samples_in_step += 1
         self._quality_reason = None
         self._message = None
@@ -287,6 +293,8 @@ class RegistrationSession:
             quality_reason=reason,
             confirmation_remaining_ms=max(0, remaining),
             message=self._message,
+            action_progress=self._action_progress,
+            rejection_counts=dict(self._rejection_counts),
         )
 
     def cancel(self) -> RegistrationStatus:
@@ -432,14 +440,20 @@ class RegistrationSession:
         return sample, None
 
     def _reject(self, reason: str, at_ms: int) -> RegistrationStatus:
+        self._rejection_counts[reason] += 1
         self._quality_reason = reason
+        if reason != "wrong_action":
+            self._action_progress = None
         self._message = None
         started = self._step_started_ms
         if started is not None and at_ms - started > STEP_STALL_MS:
             self._message = "no accepted sample for this step yet"
         return self.status()
 
-    def _matches_step(self, direction: str, ratios: tuple[float | None, float | None]) -> bool:
+    def _matches_step(
+        self, direction: str, ratios: tuple[float | None, float | None],
+        nose_position: float | None = None,
+    ) -> bool:
         yaw, pitch = ratios
         step = self.step
         if step == "front":
@@ -447,19 +461,44 @@ class RegistrationSession:
                 return False
             return abs(yaw) <= YAW_FRONT_RATIO and PITCH_FRONT_MIN_RATIO <= pitch <= PITCH_FRONT_MAX_RATIO
         if step == "turn_left":
-            return yaw is not None and yaw <= -YAW_TURN_RATIO
-        if step == "turn_right":
+            # The subject's left is image-right in an unmirrored camera frame.
             return yaw is not None and yaw >= YAW_TURN_RATIO
-        if step == "look_up":
-            return pitch is not None and pitch <= PITCH_UP_RATIO
-        if step == "look_down":
-            return pitch is not None and pitch >= PITCH_DOWN_RATIO
+        if step == "turn_right":
+            return yaw is not None and yaw <= -YAW_TURN_RATIO
+        if step in {"look_up", "look_down"}:
+            if nose_position is None or not self._neutral_nose_positions or yaw is None:
+                self._action_progress = None
+                return False
+            baseline = sum(self._neutral_nose_positions) / len(self._neutral_nose_positions)
+            change = nose_position - baseline
+            if step == "look_up":
+                change = -change
+            self._action_progress = _clamp_ratio(change / NOD_POSITION_CHANGE)
+            return abs(yaw) <= YAW_TURN_RATIO and change >= NOD_POSITION_CHANGE
         return False
+
+    def _nose_position(self, sample: FaceSample) -> float | None:
+        """Nose projection along the eye-to-mouth axis in pixel-equivalent space.
+
+        Compare against this session's front samples to account for face shape
+        and camera height. Translation, scale and in-plane head roll cancel out.
+        """
+        if len(sample.landmarks) < 5:
+            return None
+        aspect = max(float(sample.frame_aspect_ratio), 1e-6)
+        left, right, nose, mouth_left, mouth_right = sample.landmarks[:5]
+        eye_x, eye_y = (left.x + right.x) / 2, (left.y + right.y) / (2 * aspect)
+        dx = (mouth_left.x + mouth_right.x) / 2 - eye_x
+        dy = (mouth_left.y + mouth_right.y) / (2 * aspect) - eye_y
+        squared_length = dx * dx + dy * dy
+        if squared_length <= 1e-12:
+            return None
+        return ((nose.x - eye_x) * dx + (nose.y / aspect - eye_y) * dy) / squared_length
 
     def _head_direction(
         self, sample: FaceSample,
     ) -> tuple[str | None, tuple[float | None, float | None]]:
-        """Derive yaw/pitch ratios from the five landmarks and the face box."""
+        """Derive yaw/pitch ratios from landmarks in pixel-equivalent space."""
 
         if len(sample.landmarks) < 5:
             return None, (None, None)
@@ -475,10 +514,14 @@ class RegistrationSession:
             return None, (None, None)
         yaw = (nose.x - eye_mid_x) / eye_distance
         mouth_gap = mouth_mid_y - eye_mid_y
-        pitch: float | None = mouth_gap / eye_distance if mouth_gap > 1e-6 else None
+        # x and y are normalized against different frame dimensions. Convert
+        # the vertical ratio back to pixel-equivalent units before comparing it
+        # with the pose thresholds, or a 16:9 frame exaggerates pitch by 1.78x.
+        aspect = max(float(sample.frame_aspect_ratio), 1e-6)
+        pitch: float | None = mouth_gap / (eye_distance * aspect) if mouth_gap > 1e-6 else None
         if abs(yaw) <= YAW_FRONT_RATIO:
             direction = "front"
-        elif yaw < 0.0:
+        elif yaw > 0.0:
             direction = "turn_left"
         else:
             direction = "turn_right"
@@ -489,11 +532,16 @@ class RegistrationSession:
 
         ratio = self._eyelid_ratio(sample)
         if ratio is None:
-            self._quality_reason = "landmarks_incomplete"
-            return self.status()
+            return self._reject("landmarks_incomplete", at_ms)
+        # A quality-approved frame supersedes the previous frame's rejection,
+        # even while we are still waiting for the eye cycle to complete.
+        self._quality_reason = None
         threshold = self._calibration.closed_ratio()
         if ratio >= threshold:
             self._calibration.observe_open(ratio)
+        if self._calibration.open_samples < EYELID_CALIBRATION_SAMPLES:
+            self._message = "calibrating open eyes; look at the camera"
+            return self.status()
         if self._blink.update(ratio, threshold, at_ms):
             self._blinks += 1
             self._samples_in_step = self._blinks
@@ -506,30 +554,33 @@ class RegistrationSession:
         return self.status()
 
     def _eyelid_ratio(self, sample: FaceSample) -> float | None:
-        """Mean vertical/horizontal eyelid ratio from the InsightFace 106 landmarks."""
+        """Mean eye aspect ratio from the two InsightFace 106-point contours."""
 
         points = self._engine.landmarks_106(sample.bbox)
         if not points:
             return None
         index_count = len(points)
+        # Distances must share one scale: x is normalized by width, y by height.
+        # This also preserves the ratio when the head rolls slightly.
+        aspect = max(float(sample.frame_aspect_ratio), 1e-6)
         ratios: list[float] = []
-        for outer, upper, inner in _EYELID_INDEX_PAIRS:
-            if max(outer, upper, inner) >= index_count:
+        for contour in _EYELID_CONTOURS:
+            if max(contour) >= index_count:
                 return None
-            x_outer, y_outer, score_outer = points[outer]
-            x_upper, y_upper, score_upper = points[upper]
-            x_inner, y_inner, score_inner = points[inner]
-            if min(score_outer, score_upper, score_inner) < EYELID_MIN_LANDMARK_SCORE:
+            eye = [points[index] for index in contour]
+            if any(score < EYELID_MIN_LANDMARK_SCORE for _, _, score in eye):
                 return None
-            width = math.hypot(x_inner - x_outer, y_inner - y_outer)
+            positions = [(x, y / aspect) for x, y, _ in eye]
+            width = math.dist(positions[0], positions[3])
             if width < EYELID_MIN_EYE_WIDTH:
                 return None
             if width < EYELID_MIN_EYE_WIDTH_RATIO * (sample.bbox[2] - sample.bbox[0]):
                 return None
-            vertical = math.hypot(
-                x_upper - (x_outer + x_inner) / 2.0, y_upper - (y_outer + y_inner) / 2.0
+            vertical = (
+                math.dist(positions[1], positions[5])
+                + math.dist(positions[2], positions[4])
             )
-            ratios.append(vertical / width)
+            ratios.append(vertical / (2.0 * width))
         if not ratios:
             return None
         return _clamp_ratio(sum(ratios) / len(ratios))
@@ -545,6 +596,7 @@ class RegistrationSession:
         self._samples_in_step = 0
         self._blinks = 0
         self._blink.reset()
+        self._action_progress = None
         self._step_started_ms = int(at_ms)
         self._quality_reason = None
         self._message = message

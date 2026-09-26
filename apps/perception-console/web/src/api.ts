@@ -3,13 +3,13 @@ export type ServiceState = "up" | "down" | "degraded";
 export type StatusResponse = {
   ok: boolean;
   state: ServiceState;
-  services: Record<string, { state: ServiceState; data?: Record<string, unknown>; message?: string }>;
+  services: Record<string, { state: ServiceState; data?: Record<string, unknown>; message?: string; error_code?: string; last_success_at_ms?: number | null }>;
 };
 
 export type VoiceEvent = {
   id: number;
   timestamp: string;
-  type: "voice_state" | "transcript" | "agent_reply" | "tool_result" | "playback_state" | "service_error";
+  type: "voice_state" | "transcript" | "agent_reply" | "agent_delta" | "tool_result" | "playback_state" | "service_error";
   payload: Record<string, unknown>;
 };
 

@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 _FIELDS = {
     "host", "port", "home_service_url", "runtime_dir", "pose_model",
-    "insightface_root", "insightface_pack", "providers",
+    "insightface_root", "insightface_pack", "speaker_pack", "providers",
     "face_review_interval_frames", "identity_window_frames",
     "identity_min_votes", "identity_similarity_threshold",
     "identity_margin_threshold", "identity_hold_ms", "observation_ttl_ms",
@@ -29,6 +29,9 @@ class VisionConfig:
     pose_model: Path
     insightface_root: Path
     insightface_pack: str
+    # Names the speaker-embedding model the stored voiceprints belong to. It must
+    # match what voice-service runs; a mismatch is refused at load, never ranked.
+    speaker_pack: str
     providers: tuple[str, ...]
     face_review_interval_frames: int
     identity_window_frames: int
@@ -91,6 +94,7 @@ class VisionConfig:
             home_service_url=raw["home_service_url"], runtime_dir=runtime_dir,
             pose_model=pose_model, insightface_root=insightface_root,
             insightface_pack=str(raw["insightface_pack"]),
+            speaker_pack=str(raw["speaker_pack"]),
             providers=tuple(str(item) for item in raw["providers"]),
             face_review_interval_frames=int(raw["face_review_interval_frames"]),
             identity_window_frames=int(raw["identity_window_frames"]),

@@ -12,6 +12,7 @@ the only place that persists them, and only in DPAPI-encrypted form.
 from __future__ import annotations
 
 import os
+from numbers import Real
 from pathlib import Path
 
 from contracts import BodyTrack, FaceQuality, FaceSample, NormalizedPoint
@@ -60,7 +61,7 @@ def _clamp_unit(value: float) -> float:
 
 
 def _is_number(value: object) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    return isinstance(value, Real) and not isinstance(value, bool)
 
 
 def _float_or_none(value: object) -> float | None:
@@ -176,7 +177,14 @@ class FaceEngine:
         try:
             # InsightFace forwards constructor kwargs to ONNX Runtime sessions.
             # Passing providers to prepare() is ignored by current releases.
-            app = FaceAnalysis(name=self.pack, root=str(self.root), providers=providers)
+            # Only these tasks feed registration and identity. Running the pack's
+            # 3D landmarks and age/gender models adds work for every detected face.
+            app = FaceAnalysis(
+                name=self.pack,
+                root=str(self.root),
+                providers=providers,
+                allowed_modules=["detection", "recognition", "landmark_2d_106"],
+            )
         except Exception as exc:  # pragma: no cover - defensive, never executed here
             self._last_message = f"insightface construction failed: {type(exc).__name__}"
             raise FaceModelMissing(self.pack) from exc
@@ -261,6 +269,7 @@ class FaceEngine:
                 embedding=embedding,
                 sharpness=sharpness,
                 brightness=brightness,
+                frame_aspect_ratio=width / height,
             ))
         return samples
 

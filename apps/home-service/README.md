@@ -34,6 +34,10 @@ curl.exe --no-buffer http://127.0.0.1:8765/events
 
 ## Run
 
+For normal use, `tools\start-perception.ps1` starts home-service with the
+configured Home Assistant backend alongside the other local services. The
+commands below are for inspecting or starting this service by itself.
+
 ```powershell
 # Print the initial snapshot and exit
 .\.venv\Scripts\python.exe apps/home-service/src/server.py --print-snapshot
@@ -42,7 +46,7 @@ curl.exe --no-buffer http://127.0.0.1:8765/events
 .\.venv\Scripts\python.exe apps/home-service/src/server.py --port 8765
 ```
 
-## The six tools
+## The six tools in the memory backend
 
 | Tool | Kind | Notes |
 | --- | --- | --- |

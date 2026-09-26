@@ -15,8 +15,8 @@ opening the project in the editor.
 dotnet run --project tools/unity-check/unity-check.csproj
 ```
 
-It compiles the real `apps/unity-house/Assets/Scripts/StateParser.cs` and checks
-it against `apps/unity-house/Assets/Tests/snapshot.json`, a payload captured from
+It compiles `apps/unity-house-payload/Assets/Scripts/StateParser.cs` and checks
+it against `apps/unity-house-payload/Assets/Tests/snapshot.json`, a payload captured from
 the live home service.
 
 ## What it already caught
@@ -38,7 +38,7 @@ The fixture must match the current service output. Regenerate it after any
 payload change:
 
 ```powershell
-.\.venv\Scripts\python.exe -c "import json,sys,pathlib; sys.path.insert(0,'apps/home-service/src'); from state import build_default_state; s=build_default_state(pathlib.Path('apps/home-service/config/rooms.json')); s.set_light('living_room_light',on=True,brightness=50); s.set_ac('bedroom_ac',on=True,mode='cool',target_temp=26); s.enqueue_broadcast('bedroom','吃饭啦',['dad']); pathlib.Path('apps/unity-house/Assets/Tests/snapshot.json').write_text(json.dumps(s.snapshot(),ensure_ascii=False,indent=2),encoding='utf-8')"
+.\.venv\Scripts\python.exe -c "import json,sys,pathlib; sys.path.insert(0,'apps/home-service/src'); from state import build_default_state; s=build_default_state(pathlib.Path('apps/home-service/config/rooms.json')); s.set_light('living_room_light',on=True,brightness=50); s.set_ac('bedroom_ac',on=True,mode='cool',target_temp=26); s.enqueue_broadcast('bedroom','吃饭啦',['dad']); pathlib.Path('apps/unity-house-payload/Assets/Tests/snapshot.json').write_text(json.dumps(s.snapshot(),ensure_ascii=False,indent=2),encoding='utf-8')"
 ```
 
 Then re-run both checks:

@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 import mimetypes
+import threading
+import time
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -16,18 +18,42 @@ from proxy import MAX_REQUEST_BODY, SERVICES, ProxyRejected, open_upstream
 
 APP_ROOT = Path(__file__).resolve().parents[1]
 DIST_ROOT = APP_ROOT / "web" / "dist"
+_last_success_at_ms: dict[str, int] = {}
+_status_lock = threading.Lock()
+FRAME_STALE_AFTER_MS = 5000
 
 
 def _service_status(name: str) -> dict:
     try:
         with open_upstream(name, "GET", "/health", None, timeout=2.0) as response:
             payload = json.loads(response.read().decode("utf-8"))
-        healthy = payload.get("ok", True)
-        if name == "vision" and (payload.get("model_ready") is False or payload.get("mode") == "error"):
-            healthy = False
-        return {"state": "up" if healthy else "degraded", "data": payload}
-    except Exception as exc:
-        return {"state": "down", "error_code": "service_unavailable", "message": type(exc).__name__}
+        now_ms = int(time.time() * 1000)
+        with _status_lock:
+            _last_success_at_ms[name] = now_ms
+        result = {"state": "up", "data": payload, "last_success_at_ms": now_ms}
+        if payload.get("ok") is False:
+            result.update(state="degraded", error_code=payload.get("error_code") or "service_unhealthy", message="服务需要处理")
+        if name == "home" and payload.get("backend") == "ha":
+            upstream = payload.get("upstream_state")
+            if upstream != "upstream_connected":
+                result.update(state="degraded", error_code="ha_upstream_unavailable",
+                              message="家庭服务在线，但 Home Assistant 尚未连接")
+        if name == "vision":
+            if payload.get("model_ready") is False:
+                result.update(state="degraded", error_code=payload.get("model_error") or "model_not_ready", message="视觉模型未就绪")
+            elif payload.get("mode") == "error":
+                result.update(state="degraded", error_code=payload.get("error_code") or "vision_error", message="视觉服务发生故障")
+            elif payload.get("mode") in {"monitoring", "registering"}:
+                last_frame = payload.get("last_frame_at_ms")
+                if not isinstance(last_frame, (int, float)) or isinstance(last_frame, bool):
+                    result.update(state="degraded", error_code="camera_no_frames", message="摄像头已启动，但尚未收到画面")
+                elif now_ms - last_frame > FRAME_STALE_AFTER_MS:
+                    result.update(state="degraded", error_code="camera_frame_stale", message="摄像头画面已中断，请检查连接")
+        return result
+    except Exception:
+        with _status_lock:
+            last_success = _last_success_at_ms.get(name)
+        return {"state": "down", "error_code": "service_unavailable", "message": "服务未运行或尚未就绪，请检查启动器与设备连接", "last_success_at_ms": last_success}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -54,6 +80,9 @@ class Handler(BaseHTTPRequestHandler):
             if host not in allowed_hosts or (origin and origin not in allowed_origins) or fetch_site not in {None, "none", "same-origin"}:
                 self._json(403, {"ok": False, "error_code": "origin_rejected", "message": "local origin required"})
                 return
+        if parsed.path == "/health" and method == "GET":
+            self._json(200, {"ok": True, "service": "perception-console"})
+            return
         if parsed.path == "/api/status" and method == "GET":
             with ThreadPoolExecutor(max_workers=3) as pool:
                 futures = {name: pool.submit(_service_status, name) for name in SERVICES}

@@ -1,11 +1,7 @@
-"""Audio device selection helpers.
-
-The Windows default input is a virtual NetEase device on this machine. The
-voice service therefore selects a physical Realtek microphone by name without
-changing the Windows default device. Device indexes are never persisted.
-"""
+"""Audio device selection helpers. Device indexes are never persisted."""
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 import sounddevice as sd
@@ -59,6 +55,27 @@ _HOST_PRIORITY = {
     "MME": 2,
     "Windows WDM-KS": 3,
 }
+
+# Endpoints that are not a microphone or a speaker: loopbacks, virtual cables and
+# the legacy mapper aliases. They frequently report themselves as usable and are
+# even the *system default* (this machine's was once a virtual device, which
+# silently produced garbage audio), so "follow the system device" must skip them
+# unless the user pinned one deliberately.
+#
+# Deliberately narrow: a bare "virtual" would flag "HyperX Virtual Surround Sound",
+# which is a real headset whose name merely contains the word.
+_VIRTUAL_ENDPOINT_HINTS = (
+    "虚拟音频", "virtual audio", "virtual cable", "virtual device", "virtual microphone",
+    "loopback", "回环", "映射器", "mapper", "主声音捕获", "primary sound",
+    "steam streaming", "立体声混音", "stereo mix", "vb-audio", "voicemeeter",
+)
+
+
+def is_virtual_endpoint(device: AudioDevice) -> bool:
+    """True for loopbacks, virtual cables and mapper aliases."""
+
+    name = device.name.casefold()
+    return any(hint in name for hint in _VIRTUAL_ENDPOINT_HINTS)
 
 
 def list_input_devices() -> list[AudioDevice]:
@@ -116,14 +133,63 @@ def _match_candidates(devices: list[AudioDevice], patterns: list[str]) -> list[A
     return ordered
 
 
+def system_default_index(kind: str) -> int | None:
+    """Return the current PortAudio default for one direction, if present."""
+    try:
+        pair = sd.default.device
+        index = int(pair[0 if kind == "input" else 1])
+    except (TypeError, ValueError, IndexError, sd.PortAudioError):
+        return None
+    return index if index >= 0 else None
+
+
+def order_candidates(devices: list[AudioDevice], default_index: int | None, patterns: list[str]) -> list[AudioDevice]:
+    """Order devices for automatic selection: the system's current one first.
+
+    Real endpoints come before virtual ones at every level, so a virtual endpoint
+    that happens to be the system default cannot take over the microphone or the
+    speaker. It stays in the list, last: if nothing real exists the service should
+    still start and report honestly, not refuse to run.
+    """
+
+    matched = _match_candidates(devices, patterns)
+    default = next((item for item in devices if item.index == default_index), None)
+
+    ordered: list[AudioDevice] = []
+    for allow_virtual in (False, True):
+        for candidate in ([default] if default else []) + matched:
+            if candidate is None or candidate in ordered:
+                continue
+            if is_virtual_endpoint(candidate) and not allow_virtual:
+                continue
+            ordered.append(candidate)
+    return ordered
+
+
+def _automatic_candidates(devices: list[AudioDevice], patterns: list[str], kind: str) -> list[AudioDevice]:
+    return order_candidates(devices, system_default_index(kind), patterns)
+
+
+def _selected_candidates(
+    devices: list[AudioDevice], patterns: list[str], kind: str, preferred: dict[str, str] | None,
+) -> list[AudioDevice]:
+    automatic = _automatic_candidates(devices, patterns, kind)
+    if preferred is None:
+        return automatic
+    selected = [item for item in devices if item.name == preferred.get("name") and item.hostapi == preferred.get("hostapi")]
+    return [*selected, *(item for item in automatic if item not in selected)]
+
+
 def _select(
     devices: list[AudioDevice],
     patterns: list[str],
     sample_rate: int,
     check,
     kind: str,
+    *,
+    automatic: bool = False,
 ) -> AudioDevice:
-    candidates = _match_candidates(devices, patterns)
+    candidates = _automatic_candidates(devices, patterns, kind) if automatic else _match_candidates(devices, patterns)
     errors = []
     for device in candidates:
         try:
@@ -150,6 +216,7 @@ def select_playback_target(
     name_contains: str | None = None,
     sample_rate: int = config.TTS_SAMPLE_RATE,
     patterns: list[str] | None = None,
+    preferred: dict[str, str] | None = None,
 ) -> PlaybackTarget:
     """Select an output device *and* a verified channel/rate combination.
 
@@ -158,11 +225,12 @@ def select_playback_target(
     working combination avoids the failure mode where a legacy host API accepts
     writes but produces no audible output.
     """
+    automatic = patterns is None and name_contains is None and not os.environ.get("SMART_HOME_OUTPUT_DEVICE")
     if patterns is None:
         patterns = [name_contains] if name_contains else config.output_device_candidates()
 
     devices = list_output_devices()
-    candidates = _match_candidates(devices, patterns)
+    candidates = _selected_candidates(devices, patterns, "output", preferred) if automatic else _match_candidates(devices, patterns)
     errors: list[str] = []
 
     for device in candidates:
@@ -203,18 +271,24 @@ def select_input_device(
     name_contains: str | None = None,
     sample_rate: int = 16000,
     patterns: list[str] | None = None,
+    preferred: dict[str, str] | None = None,
 ) -> AudioDevice:
-    """Select a physical input device by ordered name preference.
-
-    Matching is case-insensitive. Candidates that cannot open mono float32 at
-    the requested sample rate are skipped. This intentionally does not fall
-    back to the Windows default input, which may be a virtual or virtualized
-    device. Pass a comma-separated list via SMART_HOME_INPUT_DEVICE to adapt
-    when a different headset is plugged in.
-    """
+    """Use the working system default, then configured physical fallbacks."""
+    automatic = patterns is None and name_contains is None and not os.environ.get("SMART_HOME_INPUT_DEVICE")
     if patterns is None:
         patterns = [name_contains] if name_contains else config.input_device_candidates()
-    return _select(list_input_devices(), patterns, sample_rate, sd.check_input_settings, "input")
+    devices = list_input_devices()
+    if automatic and preferred is not None:
+        candidates = _selected_candidates(devices, patterns, "input", preferred)
+        errors = []
+        for item in candidates:
+            try:
+                sd.check_input_settings(device=item.index, channels=1, samplerate=sample_rate, dtype="float32")
+                return item
+            except sd.PortAudioError as exc:
+                errors.append(f"{item.index} {item.name}: {exc}")
+        raise RuntimeError("No usable input. " + "; ".join(errors))
+    return _select(devices, patterns, sample_rate, sd.check_input_settings, "input", automatic=automatic)
 
 
 def select_output_device(

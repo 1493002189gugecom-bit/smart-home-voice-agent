@@ -4,10 +4,16 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from enum import Enum
+import re
 from typing import Any
 
 
 KNOWN_PERSON_IDS = frozenset({"dad", "mom", "child"})
+PERSON_ID_PATTERN = re.compile(r"^person_[0-9a-f]{32}$")
+
+
+def valid_person_id(person_id: object) -> bool:
+    return isinstance(person_id, str) and (person_id in KNOWN_PERSON_IDS or PERSON_ID_PATTERN.fullmatch(person_id) is not None)
 KNOWN_ROOM_IDS = frozenset({"living_room", "bedroom", "kitchen"})
 
 
@@ -129,6 +135,19 @@ class FaceCandidate:
 
 
 @dataclass(frozen=True)
+class SpeakerCandidate:
+    """Voiceprint match, shaped like `FaceCandidate`.
+
+    ``margin`` is the gap to the runner-up: a lone enrolled person yields
+    ``None`` and must stay recognizable, exactly as faces do.
+    """
+
+    person_id: str | None
+    similarity: float | None
+    margin: float | None
+
+
+@dataclass(frozen=True)
 class FaceQuality:
     """Outcome of the pre-recognition quality gates.
 
@@ -155,6 +174,9 @@ class FaceSample:
     embedding: tuple[float, ...] | None = None
     sharpness: float = 0.0
     brightness: float = 0.0
+    # Landmarks use per-axis normalized coordinates; direction ratios need the
+    # source frame aspect ratio to recover pixel-space geometry.
+    frame_aspect_ratio: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -172,6 +194,8 @@ class RegistrationStatus:
     quality_reason: str | None = None
     confirmation_remaining_ms: int = 0
     message: str | None = None
+    action_progress: float | None = None
+    rejection_counts: dict[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -187,4 +211,6 @@ class RegistrationStatus:
             "quality_reason": self.quality_reason,
             "confirmation_remaining_ms": self.confirmation_remaining_ms,
             "message": self.message,
+            "action_progress": self.action_progress,
+            "rejection_counts": dict(self.rejection_counts),
         }

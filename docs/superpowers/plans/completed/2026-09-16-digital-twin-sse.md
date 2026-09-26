@@ -1,5 +1,11 @@
 # Digital Twin SSE Push Implementation Plan
 
+> **已完成：计划 2026-09-16，完成 2026-09-17（未提交）。** 后端 `/events`、HA WebSocket 订阅、
+> 100 ms 防抖、慢客户端快照合并、退避重连，以及 Unity/Blender 只读客户端均已实现并实测：
+> 后端/HA 194 项、Unity EditMode 22/22、PlayMode 5/5、Blender 协议 3/3。证据汇总见根
+> `task_plan.md`“数字孪生 SSE 推送（完成，未提交）”。本文件所在目录 `plans/completed/`
+> 即“已完成”集合；复选框按惯例保持未勾选。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Push Home Assistant state changes through a loopback-only SSE stream to read-only Blender and Unity digital-twin clients.

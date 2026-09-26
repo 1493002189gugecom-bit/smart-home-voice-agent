@@ -11,6 +11,7 @@
 param(
     [ValidateSet('ha', 'memory')]
     [string]$HomeBackend = 'ha',
+    [ValidateRange(5, 300)]
     [int]$TimeoutSeconds = 60,
     [switch]$NoWindow
 )
@@ -24,10 +25,14 @@ $python = Join-Path $repoRoot '.venv\Scripts\python.exe'
 $visionPython = Join-Path $repoRoot '.venv-vision\Scripts\python.exe'
 
 if (-not (Test-Path $frontendIndex -PathType Leaf)) {
-    throw 'Perception UI is not built. Run npm install and npm run build in apps\perception-console\web first.'
+    Write-Warning 'Perception UI is not built. Run npm install and npm run build in apps\perception-console\web first.'
+    exit 2
 }
 
-if (-not (Test-Path $python -PathType Leaf)) { throw "Required Python interpreter not found: $python" }
+if (-not (Test-Path $python -PathType Leaf)) {
+    Write-Warning "Required Python interpreter not found: $python"
+    exit 2
+}
 
 New-Item -ItemType Directory -Path $runtimeRoot -Force | Out-Null
 
@@ -36,6 +41,16 @@ $env:PYTHONIOENCODING = 'utf-8'
 function Test-ListeningPort {
     param([int]$Port)
     return $null -ne (Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue | Select-Object -First 1)
+}
+
+function Test-ServicePortOwner {
+    param($Service)
+    $listener = Get-NetTCPConnection -State Listen -LocalPort $Service.Port -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -eq $listener) { return $false }
+    $ownerInfo = Get-CimInstance Win32_Process -Filter "ProcessId = $([int]$listener.OwningProcess)" -ErrorAction SilentlyContinue
+    if ($null -eq $ownerInfo -or $ownerInfo.Name -notmatch '^pythonw?\.exe$' -or -not $ownerInfo.CommandLine) { return $false }
+    $relativeScript = $Service.Script.Substring($repoRoot.Length + 1)
+    return $ownerInfo.CommandLine.Contains($Service.Script) -or $ownerInfo.CommandLine.Contains($relativeScript)
 }
 
 function Test-Endpoint {
@@ -102,40 +117,51 @@ $services = @(
     [pscustomobject]@{
         Name = 'console'; Port = 8770; Python = $python
         Script = Join-Path $repoRoot 'apps\perception-console\src\main.py'
-        Arguments = @(); Health = 'http://127.0.0.1:8770/api/status'
+        Arguments = @(); Health = 'http://127.0.0.1:8770/health'
     }
 )
 
 $owned = @(Get-OwnedProcesses)
+$failures = @()
 foreach ($service in $services) {
+    $launchClock = [System.Diagnostics.Stopwatch]::StartNew()
+    $runKind = 'warm'
+    $launchOutcome = 'ok'
+    $launchError = $null
+    try {
     $ownedEntry = $owned | Where-Object { $_.name -eq $service.Name } | Select-Object -First 1
     if ($null -ne $ownedEntry -and (Test-OwnedEntry -Entry $ownedEntry)) {
-        Write-Host "[$($service.Name)] existing launcher-owned process is still starting or running (PID $($ownedEntry.pid))"
+        Write-Host "[$($service.Name)] waiting for existing launcher process (PID $($ownedEntry.pid))"
+        $serviceDeadline = (Get-Date).AddSeconds($TimeoutSeconds)
+        while (-not ((Test-Endpoint -Uri $service.Health) -and (Test-ServicePortOwner -Service $service))) {
+            if ((Get-Date) -gt $serviceDeadline) {
+                throw "[$($service.Name)] did not become ready within $TimeoutSeconds seconds on port $($service.Port)."
+            }
+            Start-Sleep -Milliseconds 500
+        }
+        Write-Host "[$($service.Name)] ready on 127.0.0.1:$($service.Port)"
         continue
     }
-    if (Test-Endpoint -Uri $service.Health) {
-        Write-Host "[$($service.Name)] using healthy existing service on 127.0.0.1:$($service.Port)"
+    if ((Test-Endpoint -Uri $service.Health) -and (Test-ServicePortOwner -Service $service)) {
+        Write-Host "[$($service.Name)] ready on 127.0.0.1:$($service.Port) (existing process)"
         continue
     }
     if (Test-ListeningPort -Port $service.Port) {
-        Write-Warning "[$($service.Name)] port $($service.Port) is occupied, but its health endpoint did not respond."
-        continue
+        throw "[$($service.Name)] port $($service.Port) is occupied, but it is not a ready service from this project. Run tools\stop-perception.ps1 and inspect the port owner."
     }
+    $runKind = 'cold'
     if (-not (Test-Path $service.Python -PathType Leaf)) {
-        Write-Warning "[$($service.Name)] Python interpreter not found: $($service.Python)"
-        continue
+        throw "[$($service.Name)] Python interpreter not found: $($service.Python)"
     }
     if (-not (Test-Path $service.Script -PathType Leaf)) {
-        Write-Warning "[$($service.Name)] service script not found: $($service.Script)"
-        continue
+        throw "[$($service.Name)] service script not found: $($service.Script)"
     }
     if ($service.Name -eq 'home') {
         $env:HOME_SERVICE_BACKEND = $HomeBackend
         if ($HomeBackend -eq 'ha') {
             $haEnv = Join-Path $repoRoot 'runtime\home-assistant\ha.env'
             if (-not (Test-Path $haEnv -PathType Leaf)) {
-                Write-Warning "Home Assistant credentials are missing: $haEnv. Home service was not started."
-                continue
+                throw "Home Assistant credentials are missing: $haEnv"
             }
             $env:HOME_ASSISTANT_URL = 'http://127.0.0.1:8123'
             $env:HA_ENV_FILE = $haEnv
@@ -150,13 +176,11 @@ foreach ($service in $services) {
             -WorkingDirectory $repoRoot -WindowStyle Hidden -PassThru
     }
     catch {
-        Write-Warning "[$($service.Name)] failed to start: $($_.Exception.GetType().Name)"
-        continue
+        throw "[$($service.Name)] failed to start: $($_.Exception.Message)"
     }
     $processInfo = Get-CimInstance Win32_Process -Filter "ProcessId = $($process.Id)" -ErrorAction SilentlyContinue
     if ($null -eq $processInfo) {
-        Write-Warning "[$($service.Name)] process exited before it could be recorded; inspect its status in the console."
-        continue
+        throw "[$($service.Name)] process exited before it could be recorded."
     }
     $owned += [pscustomobject]@{
         name = $service.Name
@@ -165,31 +189,91 @@ foreach ($service in $services) {
         creationTicks = $processInfo.CreationDate.ToUniversalTime().Ticks
     }
     Save-Manifest -Processes $owned
-    Write-Host "[$($service.Name)] started (PID $($process.Id))"
-}
-
-Save-Manifest -Processes $owned
-
-$deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-while (-not (Test-Endpoint -Uri 'http://127.0.0.1:8770/api/status')) {
-    if ((Get-Date) -gt $deadline) {
-        throw 'Perception console did not become ready. Check the service status and local environment.'
+    Write-Host "[$($service.Name)] started (PID $($process.Id)); waiting for health"
+    $serviceDeadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while (-not ((Test-Endpoint -Uri $service.Health) -and (Test-ServicePortOwner -Service $service))) {
+        if ((Get-Date) -gt $serviceDeadline) {
+            throw "[$($service.Name)] did not become ready within $TimeoutSeconds seconds on port $($service.Port)."
+        }
+        Start-Sleep -Milliseconds 500
     }
-    Start-Sleep -Milliseconds 500
+    Write-Host "[$($service.Name)] ready on 127.0.0.1:$($service.Port)"
+    }
+    catch {
+        # A model, device or credential fault must not prevent the console from
+        # starting and showing which service needs attention.
+        $failures += [pscustomobject]@{ Name = $service.Name; Message = $_.Exception.Message }
+        $launchOutcome = 'error'
+        $launchError = 'startup_failed'
+        Write-Warning "[$($service.Name)] $($_.Exception.Message)"
+    }
+    finally {
+        $launchClock.Stop()
+        # The reporter accepts only numeric timing and a fixed error code.
+        try {
+            & $python (Join-Path $repoRoot 'tools\perception-report.py') record `
+                --component launcher --stage ("start_" + $service.Name) `
+                --outcome $launchOutcome --duration-ms $launchClock.Elapsed.TotalMilliseconds `
+                --run-kind $runKind --error-code $(if ($launchError) { $launchError } else { 'none' }) 2>$null | Out-Null
+        }
+        catch { Write-Verbose 'Diagnostic recording was unavailable.' }
+    }
 }
 
-Write-Host 'Perception center is ready at http://127.0.0.1:8770/'
-if (-not $NoWindow) {
-    $browserCandidates = @(
+Save-Manifest -Processes @(Get-OwnedProcesses)
+
+$consoleReady = (Test-Endpoint -Uri 'http://127.0.0.1:8770/health') -and `
+    (Test-ServicePortOwner -Service ($services | Where-Object { $_.Name -eq 'console' }))
+if ($consoleReady) {
+    Write-Host 'Perception center is ready at http://127.0.0.1:8770/'
+    try {
+        $statusResponse = Invoke-WebRequest -Uri 'http://127.0.0.1:8770/api/status' -UseBasicParsing -TimeoutSec 8
+        $statusBody = $statusResponse.Content | ConvertFrom-Json
+        if ($null -eq $statusBody.services) { throw 'component status missing' }
+        foreach ($service in $services | Where-Object { $_.Name -ne 'console' }) {
+            $component = $statusBody.services.($service.Name)
+            if ($null -eq $component) { throw "component status missing: $($service.Name)" }
+            if ($null -ne $component -and $component.state -ne 'up' -and
+                @($failures | Where-Object { $_.Name -eq $service.Name }).Count -eq 0) {
+                $failures += [pscustomobject]@{ Name = $service.Name; Message = $component.error_code }
+                Write-Warning "[$($service.Name)] needs attention: $($component.error_code)"
+            }
+        }
+    }
+    catch {
+        $failures += [pscustomobject]@{ Name = 'status'; Message = 'status_unavailable' }
+        Write-Warning 'Perception console is online, but component status could not be read.'
+    }
+}
+else {
+    Write-Warning 'Perception console is unavailable on 127.0.0.1:8770; review the console failure above.'
+}
+if ($consoleReady -and -not $NoWindow) {
+    $consoleUrl = 'http://127.0.0.1:8770/'
+    $browserCandidates = @(@(
         (Join-Path ${env:ProgramFiles(x86)} 'Microsoft\Edge\Application\msedge.exe'),
         (Join-Path $env:ProgramFiles 'Microsoft\Edge\Application\msedge.exe'),
         (Join-Path $env:ProgramFiles 'Google\Chrome\Application\chrome.exe'),
         (Join-Path ${env:ProgramFiles(x86)} 'Google\Chrome\Application\chrome.exe')
-    ) | Where-Object { $_ -and (Test-Path $_ -PathType Leaf) }
-    if ($browserCandidates.Count -eq 0) {
-        Write-Warning 'Edge or Chrome was not found. Open http://127.0.0.1:8770/ manually.'
+    ) | Where-Object { $_ -and (Test-Path $_ -PathType Leaf) })
+    try {
+        if ($browserCandidates.Count -gt 0) {
+            Start-Process -FilePath $browserCandidates[0] -ArgumentList @('--new-window', "--app=$consoleUrl") `
+                -WindowStyle Normal -ErrorAction Stop | Out-Null
+        }
+        else {
+            Start-Process -FilePath $consoleUrl -ErrorAction Stop | Out-Null
+        }
+        Write-Host "Requested a visible perception console window: $consoleUrl"
     }
-    else {
-        Start-Process -FilePath $browserCandidates[0] -ArgumentList '--app=http://127.0.0.1:8770/' | Out-Null
+    catch {
+        $failures += [pscustomobject]@{ Name = 'window'; Message = 'window_open_failed' }
+        Write-Warning "Could not open the perception console window: $($_.Exception.Message). Open $consoleUrl manually."
     }
 }
+if ($failures.Count -gt 0) {
+    Write-Warning "$($failures.Count) service(s) need attention. Open the console Service page for component status."
+}
+if (-not $consoleReady) { exit 2 }
+if ($failures.Count -gt 0) { exit 1 }
+exit 0

@@ -1,5 +1,28 @@
 # HA Eight-Device State Sync Implementation Plan
 
+> **状态：主体已完成，遗留两个未修缺陷（用户明确 defer）。**
+> 八设备注册与健康的 HA→SSE 路径可用；但 2026-09-20 的最终评审判 **CHANGES REQUIRED**
+> （无 critical，2 项 important），用户当时指示先转做 Unity，因此后端未修复。
+>
+> 评审原文在 `.superpowers/sdd/2026-09-17-ha-eight-device-sync/final-review.md`——
+> 该目录被 Git 忽略，所以把结论摘录在这里，避免只存在于本机：
+>
+> 1. **缺一个 HA 实体就冻结整份快照，并保留它上一次的在线状态**
+>    （`apps/home-service/src/server.py:351-365` + `ha_service.py:412-429`）：
+>    `LiveStateStream.publish_snapshot()` 走“全有或全无”的房间查询，任一实体 404 会让
+>    `_query_rooms()` 放弃整份结果，只发 `snapshot_unavailable` 并沿用旧快照；于是已下线的
+>    空调在画面上仍显示在线制冷，另外七个设备的真实变化也停止送达。设计明确要求缺失/离线
+>    设备停止自己的效果。修法：把 catalog 内已知实体的 `not_found` 当作“该设备缺失/离线”，
+>    保留稳定 id 并继续读取其他设备；真后端故障仍需显式报错；补一个假 HA 回归用例。
+> 2. **瞬时 HA 读取失败没有重试，重连的 SSE 客户端可能无限期拿到旧状态**
+>    （`server.py:359-365` 与 `server.py:330-334`）：失败后只发 `snapshot_unavailable` 就返回，
+>    既不排重试也不记待刷新；下一次刷新只依赖新的实体事件或新的 `upstream_connected`，
+>    而 WebSocket 仍健康时两者都不保证发生；`snapshot_for_connection()` 也直接返回旧缓存。
+>    修法：保留待刷新项，带退避重试，流停止时取消、成功后清除；补一个“单次读失败后
+>    八设备快照最终仍发布并可被新连接取到”的假 HA 用例。
+>
+> 修完之前，本计划不能算通过；`docs/superpowers/README.md` 的“必要”一节也指向这里。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Register all eight digital-twin devices in Home Assistant and make the HA-backed SSE snapshot match their authoritative HA states.

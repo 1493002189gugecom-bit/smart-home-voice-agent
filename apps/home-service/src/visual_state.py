@@ -11,14 +11,18 @@ backends can never resurrect a historical or simulated room.
 from __future__ import annotations
 
 import os
+import json
 import secrets
 import threading
 import time
+import uuid
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 KNOWN_PERSON_IDS = frozenset({"dad", "mom", "child"})
+PERSON_ID_PATTERN = re.compile(r"^person_[0-9a-f]{32}$")
 KNOWN_ROOM_IDS = frozenset({"living_room", "bedroom", "kitchen"})
 POSE_VALUES = frozenset(
     {"standing", "sitting", "lying", "suspected_fall", "hand_raised", "unknown"}
@@ -38,6 +42,7 @@ TOKEN_BYTES = 32
 # keep showing a person who already left the frame.
 DEFAULT_OBSERVATION_TTL_MS = 3_500
 DEFAULT_RUNTIME_DIR = Path(__file__).resolve().parents[3] / "runtime" / "vision"
+DEFAULT_PERSON_DIRECTORY = DEFAULT_RUNTIME_DIR / "persons.json"
 DEFAULT_TOKEN_PATH = DEFAULT_RUNTIME_DIR / "home-service.token"
 
 _SUBMIT_KEYS = frozenset(
@@ -128,7 +133,7 @@ class _Track:
 
     @property
     def confirmed_person(self) -> str | None:
-        if self.identity_state == "confirmed" and self.person_id in KNOWN_PERSON_IDS:
+        if self.identity_state == "confirmed" and self.person_id is not None:
             return self.person_id
         return None
 
@@ -173,14 +178,16 @@ class VisualStateStore:
         *,
         observation_ttl_ms: int,
         token_path: Path = DEFAULT_TOKEN_PATH,
+        directory_path: Path | None = None,
         clock=time.time,
     ) -> None:
-        unknown = set(person_catalog) - KNOWN_PERSON_IDS
+        unknown = {item for item in person_catalog if item not in KNOWN_PERSON_IDS and not PERSON_ID_PATTERN.fullmatch(item)}
         if unknown:
             raise ValueError(f"unknown person ids in catalog: {sorted(unknown)}")
         self._ttl_ms = int(observation_ttl_ms)
         self._clock = clock
         self._token_path = token_path
+        self._directory_path = directory_path
         self._token: str | None = None
         self._lock = threading.RLock()
         self._sessions: dict[str, _Session] = {}
@@ -193,6 +200,61 @@ class VisualStateStore:
             )
             for person_id, record in person_catalog.items()
         }
+        if directory_path is not None and directory_path.exists():
+            try:
+                # utf-8-sig accepts a byte-order mark: Notepad and Windows
+                # PowerShell both add one, and a hand-edited directory file must
+                # not be able to stop the service from starting.
+                text = directory_path.read_text(encoding="utf-8-sig")
+            except OSError as exc:
+                raise ValueError(f"person directory is unreadable: {exc.strerror}") from exc
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"person directory is not valid JSON: {directory_path.name} (line {exc.lineno})"
+                ) from exc
+            if not isinstance(payload, list):
+                raise ValueError("person directory is invalid")
+            for record in payload:
+                if (not isinstance(record, dict) or not isinstance(record.get("id"), str)
+                        or not PERSON_ID_PATTERN.fullmatch(record["id"])
+                        or not isinstance(record.get("display_name"), str)
+                        or not record["display_name"].strip()):
+                    raise ValueError("person directory entry is invalid")
+                person_id = record["id"]
+                if person_id in self._persons:
+                    raise ValueError("duplicate person in directory")
+                self._persons[person_id] = _PersonView(person_id, record["display_name"].strip(), [])
+
+    def persons_directory(self) -> list[dict[str, str]]:
+        with self._lock:
+            return [{"id": item.person_id, "display_name": item.display_name}
+                    for item in self._persons.values()]
+
+    def create_person(self, display_name: str) -> dict[str, str]:
+        name = display_name.strip() if isinstance(display_name, str) else ""
+        if not name or len(name) > 40 or any(ord(char) < 32 for char in name):
+            raise ValueError("人物称呼须为 1 到 40 个可见字符")
+        if self._directory_path is None:
+            raise ValueError("person directory is unavailable")
+        with self._lock:
+            if any(view.display_name.casefold() == name.casefold() for view in self._persons.values()):
+                raise ValueError("该人物称呼已存在")
+            person_id = "person_" + uuid.uuid4().hex
+            entries = [{"id": view.person_id, "display_name": view.display_name}
+                       for view in self._persons.values() if PERSON_ID_PATTERN.fullmatch(view.person_id)]
+            entries.append({"id": person_id, "display_name": name})
+            path = self._directory_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
+            try:
+                temporary.write_text(json.dumps(entries, ensure_ascii=False), encoding="utf-8")
+                os.replace(temporary, path)
+            finally:
+                temporary.unlink(missing_ok=True)
+            self._persons[person_id] = _PersonView(person_id, name, [])
+            return {"id": person_id, "display_name": name}
 
     # ------------------------------------------------------------- auth
     def authorize(self, token: str | None) -> bool:
@@ -436,8 +498,8 @@ class VisualStateStore:
 
         person_id = item.get("person_id")
         if person_id is not None:
-            if person_id not in KNOWN_PERSON_IDS:
-                raise VisualStateError("unknown_person", "person_id must be dad, mom, or child")
+            if person_id not in self._persons:
+                raise VisualStateError("unknown_person", "person_id is not in the person directory")
             if identity_state != "confirmed":
                 # A named but unconfirmed identity must never publish a location,
                 # so it is stored as unknown instead of being silently trusted.

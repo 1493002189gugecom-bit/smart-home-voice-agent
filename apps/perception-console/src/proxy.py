@@ -20,15 +20,19 @@ class Service:
 
 SERVICES = {
     "home": Service("home", "http://127.0.0.1:8765", {
-        "GET": ("/health", "/state", "/snapshot", "/events", "/tool/room_status", "/tool/person_location", "/tool/device_status"),
+        "GET": ("/health", "/state", "/snapshot", "/events", "/persons", "/tool/room_status", "/tool/person_location", "/tool/device_status"),
+        "POST": ("/persons",),
     }),
     "vision": Service("vision", "http://127.0.0.1:8766", {
-        "GET": ("/health", "/config", "/cameras", "/results", "/preview.jpg", "/preview.mjpeg", "/registration"),
+        "GET": ("/health", "/config", "/cameras", "/results", "/preview.jpg", "/preview.mjpeg", "/registration", "/registrations", "/identity/speaker/status"),
         "POST": ("/camera/select", "/room/select", "/monitor/start", "/monitor/pause", "/registration/start", "/registration/cancel"),
         "DELETE": ("/registration/",),
     }),
     "voice": Service("voice", "http://127.0.0.1:8767", {
-        "GET": ("/health", "/history", "/events", "/devices"),
+        # Voiceprint enrolment is start/watch/cancel only: the microphone belongs to
+        # the voice loop, so there is deliberately no route that uploads audio.
+        "GET": ("/health", "/history", "/events", "/devices", "/identity/enroll/voice/status"),
+        "POST": ("/devices/select", "/identity/enroll/voice/start", "/identity/enroll/voice/cancel"),
     }),
 }
 

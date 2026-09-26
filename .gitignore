@@ -7,6 +7,8 @@
 /docs/*
 !/docs/superpowers/
 /docs/superpowers/*
+# The single status index for every plan, spec, note and report under this tree.
+!/docs/superpowers/README.md
 !/docs/superpowers/specs/
 !/docs/superpowers/plans/
 !/docs/superpowers/notes/
@@ -20,6 +22,7 @@
 !/tools/unity-check/
 !/tools/start-perception.ps1
 !/tools/stop-perception.ps1
+!/tools/perception-report.py
 # dotnet build output from the unity-check harness.
 /tools/unity-check/obj/
 /tools/unity-check/bin/
@@ -30,6 +33,8 @@
 
 !/apps/
 /apps/*
+!/apps/diagnostics.py
+!/apps/tests/
 
 # Voice service (Python) and the Unity house project.
 !/apps/voice-service/

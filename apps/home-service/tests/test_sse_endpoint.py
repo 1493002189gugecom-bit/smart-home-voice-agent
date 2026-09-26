@@ -1,4 +1,5 @@
 import json
+import hashlib
 import sys
 import threading
 import time
@@ -11,6 +12,8 @@ sys.path.insert(0, str(SRC))
 
 from server import HomeServiceApp, LiveStateStream, create_server  # noqa: E402
 from state import build_default_state  # noqa: E402
+from diagnostics import DiagnosticWriter, read_records  # noqa: E402
+import server as server_module  # noqa: E402
 
 
 def read_event(response):
@@ -77,11 +80,75 @@ def test_events_sends_snapshot_immediately_and_memory_mutation_pushes():
                 if item["id"] == "living_room_light"
             )
             assert device["state"] == {"on": True, "brightness": 61}
+            assert "sse-test-light-on" in second["data"]["trigger_ids"]
     finally:
         server.shutdown()
         server.server_close()
         server.stream.stop()
         thread.join(timeout=2)
+
+
+def test_coalesced_observations_retain_both_trigger_ids(monkeypatch, tmp_path):
+    monkeypatch.setattr(server_module, "DIAGNOSTICS", DiagnosticWriter(tmp_path, "home"))
+    stream = LiveStateStream(HomeServiceApp(build_default_state()))
+    stream.publish_after_vision_mutation = lambda: None
+    try:
+        stream.after_request("POST", 200, "/vision/observations",
+                             {"session_id": "vision-abc", "observed_at_ms": 1001}, {})
+        stream.after_request("POST", 200, "/vision/observations",
+                             {"session_id": "vision-abc", "observed_at_ms": 1002}, {})
+        item = stream.publish_snapshot()
+        assert item is not None
+        assert item.data["trigger_ids"] == ["vision-abc:1001", "vision-abc:1002"]
+        records = [row for row in read_records(tmp_path) if row["stage"] == "sse_snapshot"]
+        expected = [hashlib.sha256(value.encode()).hexdigest()[:24] for value in item.data["trigger_ids"]]
+        assert records[-1]["trigger_ids"] == expected
+    finally:
+        stream.stop()
+
+
+def test_health_summary_preserves_last_ha_connection_time():
+    stream = LiveStateStream(HomeServiceApp(build_default_state()))
+    try:
+        stream._on_ha_status("upstream_connected")
+        connected = stream.health_summary()
+        assert connected["upstream_last_connected_at_ms"] > 0
+        stream._on_ha_status("upstream_disconnected")
+        disconnected = stream.health_summary()
+        assert disconnected["upstream_state"] == "upstream_disconnected"
+        assert disconnected["upstream_last_connected_at_ms"] == connected["upstream_last_connected_at_ms"]
+    finally:
+        stream.stop()
+
+
+def test_http_health_exposes_stream_upstream_state():
+    server = create_server(HomeServiceApp(build_default_state()), "127.0.0.1", 0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with urlopen(f"http://127.0.0.1:{server.server_address[1]}/health", timeout=2) as response:
+            health = json.load(response)
+        assert health["ok"] is True
+        assert health["upstream_state"] == "not_applicable"
+    finally:
+        server.shutdown()
+        server.server_close()
+        server.stream.stop()
+        thread.join(timeout=2)
+
+
+def test_failed_snapshot_keeps_trigger_for_retry(monkeypatch):
+    stream = LiveStateStream(HomeServiceApp(build_default_state()))
+    original = server_module.canonical_memory_snapshot
+    try:
+        monkeypatch.setattr(server_module, "canonical_memory_snapshot", lambda *args, **kwargs: 1 / 0)
+        stream.after_request("POST", 200, "/tool/set_light", {"operation_id": "retry-op"}, {})
+        monkeypatch.setattr(server_module, "canonical_memory_snapshot", original)
+        item = stream.publish_snapshot()
+        assert item is not None
+        assert item.data["trigger_ids"] == ["retry-op"]
+    finally:
+        stream.stop()
 
 
 def test_events_endpoint_is_read_only():
@@ -174,8 +241,7 @@ def test_upstream_recovery_reports_status_and_publishes_fresh_snapshot():
         assert connected.event == "status"
         assert connected.data["state"] == "upstream_connected"
 
-        time.sleep(0.06)
-        refreshed = stream.hub.wait_after(connected.id, timeout=0)
+        refreshed = stream.hub.wait_after(connected.id, timeout=0.5)
         assert refreshed.event == "snapshot"
         assert refreshed.data["version"] > initial.data["version"]
     finally:

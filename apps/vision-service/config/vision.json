@@ -6,6 +6,7 @@
   "pose_model": "D:/smart-home-models/yolo26n-pose.pt",
   "insightface_root": "D:/smart-home-models/insightface",
   "insightface_pack": "buffalo_l",
+  "speaker_pack": "speaker_v1",
   "providers": ["CUDAExecutionProvider", "CPUExecutionProvider"],
   "face_review_interval_frames": 5,
   "identity_window_frames": 5,

@@ -4,7 +4,7 @@
 状态：**自动化、真实栈与网页人工确认全部完成**
 
 对应规格：`docs/superpowers/specs/2026-09-13-ha-closed-loop-completion-design.md`
-对应计划：`docs/superpowers/plans/2026-09-13-ha-closed-loop-completion.md`
+对应计划：`docs/superpowers/plans/completed/2026-09-13-ha-closed-loop-completion.md`（计划 2026-09-13，完成 2026-09-13）
 
 ## 1. 结论
 

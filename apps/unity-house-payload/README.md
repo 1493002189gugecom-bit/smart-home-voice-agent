@@ -31,6 +31,9 @@ correct source for them.
 
 **3. Start the home service** (needed for a live connection)
 
+For normal use, `tools\start-perception.ps1` starts all local services. The
+command below starts only home-service for Unity connection checks.
+
 ```powershell
 .\.venv\Scripts\python.exe apps/home-service/src/server.py --port 8765
 ```

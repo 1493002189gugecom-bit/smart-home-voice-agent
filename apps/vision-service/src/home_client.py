@@ -11,11 +11,16 @@ who have already moved, so queueing it would publish a stale position.
 from __future__ import annotations
 
 import json
+import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from diagnostics import DiagnosticWriter
 
 from latest import LatestValue
 
@@ -26,6 +31,7 @@ SYNC_SYNCED = "synced"
 SYNC_PENDING = "pending"
 SYNC_DISCONNECTED = "disconnected"
 SYNC_NOT_MONITORING = "not_monitoring"
+DIAGNOSTICS = DiagnosticWriter(component="vision")
 
 
 class HomeSyncClient:
@@ -145,10 +151,24 @@ class HomeSyncClient:
             return self._post_locked(path, payload, expect_confirmation=expect_confirmation)
 
     def _post_locked(self, path: str, payload: dict[str, Any], *, expect_confirmation: bool = False) -> bool:
+        started = time.perf_counter()
+        session_id, observed = payload.get("session_id"), payload.get("observed_at_ms")
+        observation_id = f"{session_id}:{observed}" if isinstance(session_id, str) and isinstance(observed, int) else None
+
+        def record(ok: bool, error_code: str | None = None) -> None:
+            DIAGNOSTICS.emit("home_sync", outcome="ok" if ok else "error",
+                             observation_id=observation_id,
+                             duration_ms=(time.perf_counter() - started) * 1000,
+                             error_code=error_code)
+
         token = self.token()
         if token is None:
             self._set_state(SYNC_DISCONNECTED, "home_service_token_missing")
+            record(False, "home_service_token_missing")
             return False
+        if path == "/vision/observations" and observation_id is not None:
+            DIAGNOSTICS.emit("observation", observation_id=observation_id,
+                             duration_ms=max(0, time.time() * 1000 - observed))
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(
             self.base_url + path,
@@ -163,11 +183,14 @@ class HomeSyncClient:
             with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
                 if not 200 <= int(response.status) < 300:
                     self._set_state(SYNC_DISCONNECTED, f"http_{response.status}")
+                    record(False, "http_error")
                     return False
         except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError) as exc:
             # The error text may embed the URL, so only the exception class is kept.
             self._set_state(SYNC_DISCONNECTED, type(exc).__name__)
+            record(False, "home_sync_unavailable")
             return False
         if expect_confirmation:
             self._set_state(SYNC_SYNCED, None)
+        record(True)
         return True
