@@ -93,10 +93,64 @@ def test_single_tool_call_then_spoken_reply():
     reply = agent.handle("打开客厅灯")
 
     assert reply.ok
-    assert reply.text == "已经为你打开客厅灯。"
+    assert reply.text == "已打开客厅灯"
     assert len(executor.calls) == 1
     # The session generates the operation id locally; the model never supplies one.
     assert executor.calls[0]["operation_id"].startswith("voice-")
+
+
+def test_explicit_device_reply_uses_confirmed_outcome_instead_of_model_prose():
+    client = FakeClient([
+        ChatResponse(content=None, tool_calls=[ToolCall(
+            id="ac-off", name="set_ac", arguments={"device_id": "bedroom_ac", "on": False},
+        )]),
+        ChatResponse(content="卧室空调已打开。"),
+    ])
+    executor = FakeExecutor([
+        ToolResult(name="set_ac", ok=True, phrase="卧室空调已关闭"),
+    ])
+    agent, _ = session(client, executor)
+
+    reply = agent.handle("把卧室空调关掉")
+
+    assert reply.ok
+    assert reply.text == "卧室空调已关闭"
+
+
+def test_mixed_write_outcomes_report_both_success_and_failure():
+    client = FakeClient([
+        ChatResponse(content=None, tool_calls=[
+            write_call("light", on=True),
+            ToolCall(id="ac", name="set_ac", arguments={"device_id": "bedroom_ac", "on": False}),
+        ]),
+        ChatResponse(content="都完成了。"),
+    ])
+    executor = FakeExecutor([
+        ToolResult(name="set_light", ok=True, phrase="客厅灯已打开"),
+        ToolResult(name="set_ac", ok=False, error_code="offline", message="卧室空调离线，未关闭"),
+    ])
+    agent, _ = session(client, executor)
+
+    reply = agent.handle("打开客厅灯，并关闭卧室空调")
+
+    assert not reply.ok
+    assert reply.text == "客厅灯已打开；卧室空调离线，未关闭"
+
+
+def test_model_failure_after_device_confirmation_keeps_the_operation_result():
+    client = FakeClient([
+        ChatResponse(content=None, tool_calls=[write_call(on=True)]),
+        AgentError("agent_unavailable"),
+    ])
+    executor = FakeExecutor([ToolResult(name="set_light", ok=True, phrase="客厅灯已打开")])
+    agent, _ = session(client, executor)
+
+    reply = agent.handle("打开客厅灯")
+
+    assert not reply.ok
+    assert reply.error_code == "agent_unavailable"
+    assert "客厅灯已打开" in reply.text
+    assert "后续处理未完成" in reply.text
 
 
 def test_plain_chat_does_not_touch_any_device():
@@ -579,7 +633,29 @@ def test_deltas_are_streamed_only_when_someone_is_watching():
     assert agent.handle("我在哪").text == "我看到爸爸在卧室。"
 
     assert seen == ["我看到爸爸在卧室。"]
-    assert client.streamed == [seen.append]
+    assert len(client.streamed) == 1
+
+
+def test_model_write_claims_never_escape_as_provisional_deltas():
+    client = StreamingClient([
+        ChatResponse(
+            content="卧室空调已打开。",
+            tool_calls=[ToolCall(
+                id="ac-off", name="set_ac", arguments={"device_id": "bedroom_ac", "on": False},
+            )],
+        ),
+        ChatResponse(content="卧室空调已打开。"),
+    ])
+    executor = FakeExecutor([ToolResult(name="set_ac", ok=True, phrase="卧室空调已关闭")])
+    agent, _ = session(client, executor)
+    seen = []
+    agent.on_delta = seen.append
+
+    reply = agent.handle("把卧室空调关掉")
+
+    assert reply.text == "卧室空调已关闭"
+    assert seen == []
+    assert len(client.streamed) == 2
 
 
 def test_a_client_without_streaming_still_answers():

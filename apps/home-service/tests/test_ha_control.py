@@ -289,6 +289,7 @@ def test_query_errors_are_safe_and_not_found_is_explicit(tmp_path):
     status, result = get(app, "/tool/device_status")
     assert status == 503
     assert result["error_code"] == "backend_unavailable"
+    assert result["error"] == "暂时无法连接设备，请稍后重试"
     assert get(make_app(tmp_path, FakeGateway(), db_name="other.sqlite3"), "/tool/device_status", device="missing")[1]["error_code"] == "not_found"
 
 
@@ -322,6 +323,7 @@ def test_light_brightness_uses_percent_service_and_confirms_only_observed_state(
     assert result["ok"] is True
     assert result["status"] == "confirmed"
     assert result["data"]["state"] == {"on": True, "brightness": 50}
+    assert result["phrase"] == "客厅灯已打开，亮度 50%"
     assert gateway.calls == [("light", "turn_on", {
         "entity_id": "light.shv_living_room_light", "brightness_pct": 50
     })]
@@ -388,6 +390,7 @@ def test_explicit_service_rejection_is_rejected(tmp_path):
     })[1]
     assert result["status"] == "rejected"
     assert result["error_code"] == "backend_rejected"
+    assert result["error"] == "设备没有接受这次操作"
 
 
 def test_http_200_without_observed_target_times_out_and_same_id_replays(tmp_path):
@@ -401,6 +404,7 @@ def test_http_200_without_observed_target_times_out_and_same_id_replays(tmp_path
     assert first["ok"] is False
     assert first["status"] == "unconfirmed"
     assert first["error_code"] == "confirmation_timeout"
+    assert first["error"] == "已尝试操作，但还没有确认设备达到目标状态"
     assert len(gateway.calls) == 1
 
 
@@ -474,6 +478,19 @@ def test_explicit_relative_ac_change_uses_current_target_and_spoken_degrees(tmp_
     })]
 
 
+def test_hot_room_opens_off_ac_with_a_user_facing_confirmation(tmp_path):
+    gateway = FakeGateway()
+    result = post(make_app(tmp_path, gateway), "/tool/adjust_ac", {
+        "device_id": "bedroom_ac", "direction": "cooler",
+        "operation_id": "ac-hot-room",
+    })[1]
+
+    assert result["ok"] is True
+    assert result["data"]["state"]["mode"] == "cool"
+    assert result["data"]["state"]["target_temp"] == 26.0
+    assert result["phrase"] == "卧室空调已打开，制冷模式，设定 26 度"
+
+
 @pytest.mark.parametrize("degrees", [0, -2, True, float("inf"), 20])
 def test_explicit_relative_ac_change_rejects_invalid_degrees(tmp_path, degrees):
     gateway = FakeGateway()
@@ -496,6 +513,7 @@ def test_ac_on_defaults_to_cool_at_the_local_comfort_temperature(tmp_path):
     assert result["ok"] is True
     assert result["data"]["state"]["mode"] == "cool"
     assert result["data"]["state"]["target_temp"] == 26.0
+    assert result["phrase"] == "卧室空调已打开，制冷模式，设定 26 度"
     assert gateway.calls == [
         ("climate", "set_hvac_mode", {
             "entity_id": "climate.shv_bedroom_ac", "hvac_mode": "cool"
@@ -512,6 +530,7 @@ def test_ac_off_noops_when_already_off_and_submits_when_running(tmp_path):
     result = post(make_app(tmp_path, gateway), "/tool/set_ac", body)[1]
     assert result["ok"] is True
     assert result["data"]["noop"] is True
+    assert result["phrase"] == "卧室空调已经关闭"
     assert gateway.calls == []
 
     gateway.items["climate.shv_bedroom_ac"]["state"] = "cool"
@@ -520,6 +539,7 @@ def test_ac_off_noops_when_already_off_and_submits_when_running(tmp_path):
     })[1]
     assert result["ok"] is True
     assert result["data"]["state"]["mode"] == "off"
+    assert result["phrase"] == "卧室空调已关闭"
     assert gateway.calls == [("climate", "set_hvac_mode", {
         "entity_id": "climate.shv_bedroom_ac", "hvac_mode": "off"
     })]

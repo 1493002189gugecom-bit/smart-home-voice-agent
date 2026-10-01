@@ -42,6 +42,15 @@ def test_the_uncertain_producer_publishes_the_same_keys():
     assert set(speaker_fields(UNCERTAIN, "爸爸")) == SPEAKER_FIELDS
 
 
+def test_short_clip_duration_fields_reach_the_console():
+    """The public-event filter must keep the measured lengths used in the tooltip."""
+    produced = set(speaker_fields(
+        None, None, "too_short", audio_seconds=0.82, min_seconds=2.4,
+    ))
+
+    assert produced <= PUBLIC_FIELDS["transcript"]
+
+
 def test_barge_in_hint_and_interruption_reach_console():
     assert PUBLIC_EVENT_TYPES["tts_interrupted"] == "playback_state"
     assert {"barge_in_hint", "keyword", "interrupted"} <= PUBLIC_FIELDS["playback_state"]

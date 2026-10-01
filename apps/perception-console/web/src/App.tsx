@@ -4,18 +4,21 @@ import { canOpenRegistration, registrationGuidance, registrationStepLabel } from
 import { choiceForPreference, confirmedChoice, selectionPayload, selectionStateForRequest, SelectionStatus } from "./audio-device-ui";
 import { deviceStateLabel } from "./device-labels";
 import { speakerChip, speakerChipText } from "./speaker-chip";
+import { previewIsStale, previewSourceKey } from "./preview";
 import { VoiceEnrollment, VoiceEnrollmentResponse, enrollmentGuidance, enrollmentInstruction, enrollmentProgress, enrollmentSummary, startErrorGuidance } from "./voice-enrollment";
+import Home3D from "./Home3D";
 
-type Tab = "overview" | "vision" | "voice" | "identity" | "services";
+type Tab = "home" | "overview" | "vision" | "voice" | "identity" | "services";
 type Camera = { kind: string; device_id?: string; label: string; width?: number; height?: number; fps?: number };
 type Snapshot = { persons?: Array<Record<string, unknown>>; devices?: Array<Record<string, unknown>>; rooms?: Array<Record<string, unknown>> };
-type VisionState = { camera_id?: string; camera_room_id?: string; mode?: string; model_state?: string; camera_state?: string; actual_mode?: { width: number; height: number; fps: number | null } | null; error_code?: string | number; message?: string; last_failure?: { type: string; module: string; function: string; line: number } | null };
+type VisionState = { camera_id?: string; camera_room_id?: string; session_id?: string | null; preview_at_ms?: number | null; mode?: string; model_state?: string; camera_state?: string; actual_mode?: { width: number; height: number; fps: number | null } | null; error_code?: string | number; message?: string; last_failure?: { type: string; module: string; function: string; line: number } | null };
 type Registration = { person_id?: string; step?: string; step_index?: number; step_count?: number; accepted_samples?: number; required_samples?: number; state?: string; active?: boolean; message?: string; quality_reason?: string; action_progress?: number | null; rejection_counts?: Record<string, number> };
 type PersonEntry = { id: string; display_name: string };
 type AudioDevice = { index: number; name: string; hostapi: string; channels: number; is_system_default: boolean; is_selected: boolean; usable: boolean };
 type AudioDevices = { inputs: AudioDevice[]; outputs: AudioDevice[]; preferences?: { input: { name: string; hostapi: string } | null; output: { name: string; hostapi: string } | null }; warnings?: { input?: string | null; output?: string | null }; selection?: SelectionStatus | null };
 
 const tabs: Array<[Tab, string, string]> = [
+  ["home", "我的家", "3D 全屋视图"],
   ["overview", "总览", "全屋状态"],
   ["vision", "视觉", "摄像头与监控"],
   ["voice", "语音", "对话与设备执行"],
@@ -153,19 +156,21 @@ function ServiceDot({ state }: { state?: string }) {
 
 function App() {
   const data = useConsoleData();
-  const [tab, setTab] = useState<Tab>("overview");
+  const [tab, setTab] = useState<Tab>("home");
+  const [homeControlBusy, setHomeControlBusy] = useState(false);
   const active = tabs.find((item) => item[0] === tab)!;
 
   return (
-    <div className="shell">
+    <div className="shell home-mode">
       <aside className="sidebar">
         <div className="brand"><span className="brand-mark">⌂</span><div><strong>小屋感知中心</strong><small>LOCAL PERCEPTION</small></div></div>
-        <nav>{tabs.map(([id, label, hint]) => <button key={id} className={tab === id ? "active" : ""} onClick={() => setTab(id)}><span>{label}</span><small>{hint}</small></button>)}</nav>
+        <nav>{tabs.map(([id, label, hint]) => <button key={id} disabled={homeControlBusy} className={tab === id ? "active" : ""} onClick={() => setTab(id)}><span>{label}</span><small>{hint}</small></button>)}</nav>
         <div className="sidebar-status"><ServiceDot state={data.status?.state} /><span>{data.status?.state === "up" ? "全部服务在线" : "部分服务需要处理"}</span></div>
       </aside>
-      <main>
-        <header><div><p className="eyebrow">SMART HOME · 本机运行</p><h1>{active[1]}</h1><p>{active[2]}</p></div><div className="privacy">原始音视频不落盘</div></header>
+      <main className={tab === "home" ? "home-main" : "console-main"}>
+        {tab !== "home" && <header><div><p className="eyebrow">SMART HOME · 本机运行</p><h1>{active[1]}</h1><p>{active[2]}</p></div><div className="privacy">原始音视频不落盘</div></header>}
         {data.error && <div className="notice">{data.error}</div>}
+        {tab === "home" && <Home3D home={data.home} stale={data.homeStale} onControlBusyChange={setHomeControlBusy} />}
         {tab === "overview" && <Overview {...data} />}
         {tab === "vision" && <Vision {...data} />}
         {tab === "voice" && <Voice events={data.voiceEvents} devices={data.audioDevices} stale={data.status?.services?.voice?.state !== "up"} refreshDevices={data.refreshAudioDevices} />}
@@ -187,20 +192,29 @@ function Overview({ status, home, homeStale, voiceEvents }: ReturnType<typeof us
   </div>;
 }
 
-function LivePreview({ active, sourceKey, label }: { active: boolean; sourceKey: string; label: string }) {
+function LivePreview({ active, sourceKey, previewAtMs, label }: { active: boolean; sourceKey: string; previewAtMs?: number | null; label: string }) {
   const [visible, setVisible] = useState(false);
   const [failed, setFailed] = useState(false);
   const [attempt, setAttempt] = useState(0);
+  const [nowMs, setNowMs] = useState(Date.now());
+  useEffect(() => {
+    if (!active) return;
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [active]);
+  const stale = active && previewIsStale(previewAtMs, nowMs);
   useEffect(() => { setVisible(false); setFailed(false); setAttempt(0); }, [active, sourceKey]);
+  useEffect(() => { if (stale) setVisible(false); }, [stale]);
   useEffect(() => {
     if (!active || !failed) return;
     const timer = window.setTimeout(() => { setFailed(false); setAttempt((value) => value + 1); }, 2500);
     return () => window.clearTimeout(timer);
   }, [active, failed, attempt]);
-  return <div className={`preview ${visible ? "has-frame" : ""}`}>
-    {active && !failed && <img key={`${sourceKey}-${attempt}`} src={`/api/vision/preview.mjpeg?attempt=${attempt}`} alt={label} onLoad={() => { setVisible(true); setFailed(false); }} onError={() => { setVisible(false); setFailed(true); }} />}
-    {!visible && <span role="status">{active ? failed ? "画面连接中断，正在重试…" : "正在等待摄像头画面…" : "摄像头未开启"}</span>}
-    {visible && <span className="live-badge">镜像实时画面</span>}
+  const hasCurrentFrame = visible && !stale;
+  return <div className={`preview ${hasCurrentFrame ? "has-frame" : ""}`}>
+    {active && !failed && !stale && <img key={`${sourceKey}-${attempt}`} src={`/api/vision/preview.mjpeg?attempt=${attempt}`} alt={label} onLoad={() => { setVisible(true); setFailed(false); }} onError={() => { setVisible(false); setFailed(true); }} />}
+    {!hasCurrentFrame && <span role="status">{active ? stale ? "画面已停滞，等待摄像头恢复…" : failed ? "画面连接中断，正在重试…" : "正在等待摄像头画面…" : "摄像头未开启"}</span>}
+    {hasCurrentFrame && <span className="live-badge">镜像实时画面</span>}
   </div>;
 }
 
@@ -220,7 +234,7 @@ function Vision({ vision, cameras, status, refresh, refreshCameras }: ReturnType
     if (actual.mode !== "monitoring") await post("/api/vision/monitor/start");
     setRoomDirty(false);
   };
-  return <div className="vision-layout"><section className="card preview-card"><LivePreview active={live} sourceKey={vision.camera_id ?? "none"} label="视觉服务实时预览" /><div className="preview-meta"><span>模式：{display(vision.mode)}</span><span>模型：{display(vision.model_state)}</span><span>摄像头：{display(vision.camera_state)}</span><span>实际画面：{cameraModeText(vision.actual_mode)}</span><span>当前监控房间：{roomNames[vision.camera_room_id ?? ""] ?? "未选择"}</span></div>{vision.mode === "error" && <div className="notice" role="alert">{visionFailureText(vision)}</div>}</section>
+  return <div className="vision-layout"><section className="card preview-card"><LivePreview active={live} sourceKey={previewSourceKey(vision)} previewAtMs={vision.preview_at_ms} label="视觉服务实时预览" /><div className="preview-meta"><span>模式：{display(vision.mode)}</span><span>模型：{display(vision.model_state)}</span><span>摄像头：{display(vision.camera_state)}</span><span>实际画面：{cameraModeText(vision.actual_mode)}</span><span>当前监控房间：{roomNames[vision.camera_room_id ?? ""] ?? "未选择"}</span></div>{vision.mode === "error" && <div className="notice" role="alert">{visionFailureText(vision)}</div>}</section>
   <section className="card controls"><CardTitle title="视觉控制" subtitle="在画面中确认身份后，人物位置会同步到终端和 Unity" /><button className="secondary" disabled={busy} onClick={() => void refreshCameras()}>扫描摄像头</button><label>摄像头<select value={camera} onChange={(e) => setCamera(e.target.value)}><option value="">请选择</option>{cameras.map((item) => <option key={item.device_id} value={item.device_id}>{item.label}{item.width && item.height ? ` ${item.width}×${item.height} @${item.fps ?? 0}fps` : ""}</option>)}</select></label><button disabled={busy || !camera} onClick={() => void action(() => post("/api/vision/camera/select", { kind: "device", device_id: camera }))}>使用此摄像头</button><label>摄像头所在房间<select value={room} onChange={(e) => { setRoom(e.target.value); setRoomDirty(true); }}>{Object.entries(roomNames).map(([id, name]) => <option key={id} value={id}>{name}</option>)}</select></label><button disabled={busy} onClick={() => void action(applyRoom)}>{vision.mode === "monitoring" ? "切换监控房间" : "开始监控"}</button><button className="secondary" disabled={busy} onClick={() => void action(() => post("/api/vision/monitor/pause"))}>暂停监控</button></section></div>;
 }
 
@@ -402,7 +416,7 @@ function Identity({ registration, vision, cameras, people, registeredIds, speake
       {feedback && <div className="notice" role="alert">{feedback}</div>}
       {vision.mode === "error" && <div className="notice" role="alert">{visionFailureText(vision)}{vision.error_code != null ? `（代码 ${vision.error_code}）` : ""}。可重新选择摄像头后重试。</div>}
       {completed && <div className="registration-success" role="status"><strong>✓ {personName}的人脸已录入成功</strong><span>采集和识别确认均已完成。现在可以到“视觉”页开启监控；识别到该人物时，Unity 会更新所在房间。</span></div>}
-      <div className="registration-layout"><div>{completed ? <div className="preview-finished">人脸录入已结束 · 摄像头画面已关闭</div> : <LivePreview active={previewActive} sourceKey={vision.camera_id ?? "none"} label="人脸注册实时摄像头画面" />}<div className="preview-meta"><span>当前摄像头：{vision.camera_id ?? "尚未选择"}</span><span>实际画面：{cameraModeText(vision.actual_mode)}</span><span>画面状态：{completed ? "录入完成" : previewActive ? "采集中" : "未采集"}</span></div></div>
+      <div className="registration-layout"><div>{completed ? <div className="preview-finished">人脸录入已结束 · 摄像头画面已关闭</div> : <LivePreview active={previewActive} sourceKey={previewSourceKey(vision)} previewAtMs={vision.preview_at_ms} label="人脸注册实时摄像头画面" />}<div className="preview-meta"><span>当前摄像头：{vision.camera_id ?? "尚未选择"}</span><span>实际画面：{cameraModeText(vision.actual_mode)}</span><span>画面状态：{completed ? "录入完成" : previewActive ? "采集中" : "未采集"}</span></div></div>
       <div className="registration-side"><label htmlFor="registration-camera">选择摄像头</label><select id="registration-camera" value={selectedCamera} disabled={!!busy} onChange={(event) => setSelectedCamera(event.target.value)}><option value="">请选择摄像头</option>{selectedCamera && !cameras.some((item) => item.device_id === selectedCamera) && <option value={selectedCamera}>当前摄像头 {selectedCamera}</option>}{cameras.map((item) => <option key={item.device_id} value={item.device_id}>{item.label} · {item.width}×{item.height}</option>)}</select><button className="secondary" disabled={!!busy || !!current?.active} onClick={() => void refreshCameras()}>重新扫描摄像头</button><button disabled={!!busy || !selectedCamera || !visionAvailable} onClick={chooseCamera}>{current?.active ? "切换摄像头并重新开始" : "使用此摄像头并开始"}</button>
         {current && !completed && <><div className="step-count">步骤 {current.step_index ?? 0} / {current.step_count ?? 6}</div><h3>{registrationStepLabel(current.step)}</h3><div className="progress" role="progressbar" aria-valuemin={0} aria-valuemax={current.step_count ?? 6} aria-valuenow={current.step_index ?? 0}><i style={{ width: `${Math.max(0, Math.min(100, ((current.step_index ?? 0) / (current.step_count ?? 6)) * 100))}%` }} /></div><p>本步合格样本：{current.accepted_samples ?? 0} / {current.required_samples ?? 0}</p>{typeof current.action_progress === "number" && <p>点头动作进度：{Math.round(Math.max(0, Math.min(1, current.action_progress)) * 100)}%</p>}<p className="guidance" role="status">{guidance}</p>{rejectionCounts.length > 0 && <details className="quality-breakdown"><summary>本次未通过原因（按帧计数）</summary><ul>{rejectionCounts.map(([reason, count]) => <li key={reason}>{registrationGuidance(reason, undefined, current.step).split("。")[0]}：{count} 帧</li>)}</ul></details>}<button className="secondary" disabled={!!busy || !current.active} onClick={() => void run("cancel", () => post("/api/vision/registration/cancel"))}>取消本次注册</button></>}
       </div></div>
@@ -472,6 +486,6 @@ function VoiceprintPanel({ personId, personName, enrolled, response, busy, onSta
   </>;
 }
 
-function Dialogue({ event, who }: { event?: VoiceEvent; who: string }) { const text = event?.payload.transcript ?? event?.payload.text ?? event?.payload.message; const chip = who === "你" && event ? speakerChip(event.payload) : null; return <div className={`dialogue ${who === "你" ? "user" : "assistant"}`}><strong>{who}{chip && <span className={`speaker-chip ${chip.tone}`} title="声纹判定，仅用于称呼与可逆的自身目标">{speakerChipText(chip)}</span>}</strong><p>{display(text, "暂无内容")}</p>{event && <small>{new Date(event.timestamp).toLocaleTimeString()}</small>}</div>; }
+function Dialogue({ event, who }: { event?: VoiceEvent; who: string }) { const text = event?.payload.transcript ?? event?.payload.text ?? event?.payload.message; const chip = who === "你" && event ? speakerChip(event.payload) : null; return <div className={`dialogue ${who === "你" ? "user" : "assistant"}`}><strong>{who}{chip && <span className={`speaker-chip ${chip.tone}`} title={chip.title}>{speakerChipText(chip)}</span>}</strong><p>{display(text, "暂无内容")}</p>{event && <small>{new Date(event.timestamp).toLocaleTimeString()}</small>}</div>; }
 
 export default App;

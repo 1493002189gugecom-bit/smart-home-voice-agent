@@ -1,8 +1,8 @@
 """Voice agent orchestration: bounded tool loop, bounded context, honest wording.
 
-The tool results — not the model's prose — decide what the user is told. If any
-write failed, the model's sentence is discarded, so a hallucinated "已经打开了"
-can never be spoken.
+The tool results — not the model's prose — decide what the user is told after
+any write. Model text is also held back from the console until the tool choice
+is known, so a hallucinated success is never shown as a provisional answer.
 """
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from agent_client import (
     AgentCancelled,
@@ -262,8 +262,8 @@ class AgentSession:
         self.clock = clock
         self.system_prompt = system_prompt
         self.history: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
-        # Optional callable receiving the answer text accumulated so far. Left
-        # unset (None) in tests and headless use, where nothing is displaying it.
+        # Optional callback for an answer with no device writes. Model deltas
+        # are buffered until the response proves it will not call a write tool.
         self.on_delta = None
         # The speaker line for the *current* turn only. It is consumed by the next
         # `handle` and never survives it, so a verdict can only ever describe the
@@ -343,9 +343,7 @@ class AgentSession:
                 ToolCall(id="local_self", name=direct.tool, arguments=direct.arguments),
                 {}, relative_ac_change, speaker_person_id,
             )
-            text = result.phrase if result.ok and result.phrase else (
-                result.message or "这次没有确认到设备操作，请再说一次。"
-            )
+            text = self._write_outcomes([result])
             self.history.append({"role": "assistant", "content": text})
             self._trim()
             return AgentReply(text=text, ok=result.ok, error_code=result.error_code,
@@ -363,21 +361,31 @@ class AgentSession:
             if _cancelled(cancel):
                 return self._cancelled_reply(collected)
 
+            # A streamed model sentence may arrive before its tool calls. Hold it
+            # until the response proves this turn has no device write to report.
+            pending_delta: str | None = None
+
+            def hold_delta(text: str) -> None:
+                nonlocal pending_delta
+                pending_delta = text
+
             try:
-                response = self._ask(cancel)
+                response = self._ask(cancel, hold_delta)
             except AgentCancelled:
                 return self._cancelled_reply(collected)
             except AgentError as exc:
                 return self._fail(exc.code, collected)
 
             if not response.wants_tools:
+                writes = [result for result in collected if result.name in WRITE_TOOLS]
+                if not writes and pending_delta and self.on_delta is not None:
+                    self.on_delta(pending_delta)
                 text = self._final_text(response, collected, ending=ending)
                 self.history.append({"role": "assistant", "content": text})
                 self._trim()
                 # `ok` reports whether the house actually changed, not merely that
                 # a reply was produced, so a partial scene failure shows up in the
                 # logs instead of only in the spoken sentence.
-                writes = [result for result in collected if result.name in WRITE_TOOLS]
                 return AgentReply(
                     text=text,
                     ok=all(result.ok for result in writes),
@@ -413,12 +421,13 @@ class AgentSession:
         return self._fail("tool_loop_exceeded", collected)
 
     # ----------------------------------------------------------------- internal
-    def _ask(self, cancel: "threading.Event | None" = None) -> ChatResponse:
-        """Ask the model once, streaming the visible sentence when asked to.
+    def _ask(self, cancel: "threading.Event | None" = None,
+             hold_delta: Callable[[str], None] | None = None) -> ChatResponse:
+        """Ask the model once, buffering streamed text when watched.
 
         Streaming is opt-in per session and per client: a client without
-        `chat_stream` still works, the console simply shows the finished
-        sentence instead of watching it being typed.
+        `chat_stream` still works. Text is released only after the model's
+        response proves there is no device write in this turn.
 
         `cancel` is only forwarded to a client that declares it, so a test double
         with the two-argument contract keeps working unchanged.
@@ -426,7 +435,7 @@ class AgentSession:
         stream = getattr(self.client, "chat_stream", None)
         if self.on_delta is not None and callable(stream):
             return _call_with_cancel(
-                stream, self._messages(), self.executor.schemas(), self.on_delta, cancel=cancel
+                stream, self._messages(), self.executor.schemas(), hold_delta, cancel=cancel
             )
         return _call_with_cancel(
             self.client.chat, self._messages(), self.executor.schemas(), cancel=cancel
@@ -510,21 +519,10 @@ class AgentSession:
         self, response: ChatResponse, collected: list[ToolResult], *, ending: bool = False
     ) -> str:
         writes = [result for result in collected if result.name in WRITE_TOOLS]
-        failed = [result for result in writes if not result.ok]
-        if failed:
-            # Model prose is discarded entirely: it cannot be trusted to admit a
-            # failure, and a false success claim is the worst possible outcome.
-            return self._failure_text(failed)
-        if any(result.resolved_room_name for result in writes):
-            return "；".join(result.phrase or result.message or "已完成" for result in writes)
-        # An adjust is described precisely by the service ("turned it on at 26"),
-        # while the model tends to narrate it as a different action ("lowered one
-        # step" even though the unit was off). Prefer the service's wording.
-        adjusted = [
-            result for result in writes if result.name == ADJUST_TOOL and result.phrase
-        ]
-        if adjusted:
-            return "；".join(result.phrase for result in adjusted)
+        if writes:
+            # For every write, including explicit room/device targets and partial
+            # success, the observed operation result owns the spoken answer.
+            return self._write_outcomes(writes)
         content = (response.content or "").strip()
         if content:
             return content
@@ -532,10 +530,18 @@ class AgentSession:
             # The model asked to close the session without words; never end in
             # silence, which would look like a crash.
             return FAREWELL_TEXT
-        if writes:
-            return "；".join(result.phrase or result.message or "已完成" for result in writes)
         summary = summarize_queries(collected)
         return summary or "没有查询到结果。"
+
+    @staticmethod
+    def _write_outcomes(writes: list[ToolResult]) -> str:
+        parts = []
+        for result in writes:
+            if result.ok:
+                parts.append(result.phrase or "设备操作已确认，但未返回具体状态")
+            else:
+                parts.append(AgentSession._failure_text([result]))
+        return "；".join(dict.fromkeys(parts))
 
     @staticmethod
     def _failure_text(failed: list[ToolResult]) -> str:
@@ -562,10 +568,14 @@ class AgentSession:
         self.history = [head, *tail]
 
     def _fail(self, code: str, collected: list[ToolResult]) -> AgentReply:
-        # A failure reply still carries the tool results so the caller can log
-        # what was attempted, but the spoken text never claims success.
+        # The model can fail after a device operation already completed. Report
+        # the observed outcomes and the unfinished conversation separately.
+        writes = [result for result in collected if result.name in WRITE_TOOLS]
+        text = (self._write_outcomes(writes) + "；后续处理未完成") if writes else ERROR_TEXT.get(
+            code, "请求失败。"
+        )
         return AgentReply(
-            text=ERROR_TEXT.get(code, "请求失败。"), ok=False, error_code=code, tool_results=collected
+            text=text, ok=False, error_code=code, tool_results=collected
         )
 
     def _cancelled_reply(self, collected: list[ToolResult]) -> AgentReply:

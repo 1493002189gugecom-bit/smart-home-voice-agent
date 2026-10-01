@@ -291,7 +291,10 @@ def resolve_speaker(embedder, identity, executor, samples, sample_rate):
         return None, None, "unavailable"
 
 
-def speaker_fields(verdict, display_name, reason: str | None = None) -> dict[str, object]:
+def speaker_fields(
+    verdict, display_name, reason: str | None = None, *,
+    audio_seconds: float | None = None, min_seconds: float | None = None,
+) -> dict[str, object]:
     """Public transcript fields describing the speaker verdict.
 
     Published whenever voiceprints are configured, including when no verdict was
@@ -300,10 +303,17 @@ def speaker_fields(verdict, display_name, reason: str | None = None) -> dict[str
     """
 
     if verdict is None:
-        return {
+        fields = {
             "speaker_state": "disabled" if reason == "disabled" else "unknown",
             "speaker_reason": reason or "not_evaluated",
         }
+        if reason == "too_short" and audio_seconds is not None and min_seconds is not None:
+            # Durations explain this verdict without retaining audio or a speaker
+            # template. The two values refer to the recorded clip and this run's
+            # configured minimum, which can differ from the shipped default.
+            fields["speaker_audio_seconds"] = round(audio_seconds, 2)
+            fields["speaker_min_seconds"] = round(min_seconds, 2)
+        return fields
     return {
         "speaker_id": verdict.person_id,
         "speaker_name": display_name if verdict.usable else None,
@@ -937,7 +947,11 @@ def main() -> int:
                         log_event(
                             "asr", state=state, transcript=transcript,
                             seconds=round(asr_seconds, 3),
-                            **speaker_fields(verdict, speaker_name, speaker_reason),
+                            **speaker_fields(
+                                verdict, speaker_name, speaker_reason,
+                                audio_seconds=len(samples) / config.SAMPLE_RATE,
+                                min_seconds=(speaker_embedder.min_seconds if speaker_embedder else None),
+                            ),
                         )
                         # The agent decides intent, including whether the user is
                         # saying goodbye, so it must run before the keyword

@@ -44,6 +44,7 @@ PUBLIC_FIELDS = {
         # `speaker_reason` carries why there is no name (audio too short, nobody
         # enrolled, gallery down). Without it the console cannot tell those apart.
         "speaker_id", "speaker_name", "speaker_confidence", "speaker_state", "speaker_reason",
+        "speaker_audio_seconds", "speaker_min_seconds",
     },
     "agent_reply": {"state", "text", "ok", "error_code", "end_conversation", "tools", "seconds", "cancelled"},
     # Enrolment progress. `enroll_state` is separate from `state`, which always

@@ -44,6 +44,7 @@ class RuntimeFailureHandlingTest(unittest.TestCase):
         runtime = VisionRuntime.__new__(VisionRuntime)
         runtime._stop = threading.Event()
         runtime._lock = threading.RLock()
+        runtime._room_generation = 0
         runtime._last_failure = None
         runtime.mode = ServiceMode.MONITORING
         runtime.error_code = None

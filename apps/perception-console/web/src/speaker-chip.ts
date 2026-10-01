@@ -6,7 +6,7 @@
  * 1. Never show a name the system is not willing to act on: a verdict below the
  *    threshold carries no identity, so it renders as nameless rather than being
  *    quietly dropped.
- * 2. Never show a bare "未识别" when the reason is known. "No chip" used to mean
+ * 2. Never show a bare unknown label when the reason is known. "No chip" used to mean
  *    four different things at once — audio too short, nobody enrolled, the gallery
  *    is down, or voiceprints switched off — which is impossible to act on.
  */
@@ -21,7 +21,7 @@ export type SpeakerChip = {
 
 /** Why there is no name, in the few words a pill can hold. */
 const REASON_LABEL: Record<string, string> = {
-  too_short: "说话太短",
+  too_short: "录音不足",
   silent: "没听到声音",
   clipping: "声音过载",
   low_snr: "噪声太大",
@@ -37,7 +37,7 @@ const REASON_LABEL: Record<string, string> = {
 };
 
 const REASON_TITLE: Record<string, string> = {
-  too_short: "这句话短于 1.5 秒，声纹不足以判断，请说完整的句子",
+  too_short: "这次录音太短，无法判断声纹身份；这不影响文字识别。可以说一句稍长的话。",
   silent: "没有采集到有效声音，请检查麦克风",
   clipping: "声音过载失真，请离麦克风远一点",
   low_snr: "背景噪声偏大，请靠近麦克风",
@@ -60,6 +60,12 @@ function reasonOf(payload: Record<string, unknown>): string | null {
   return typeof value === "string" && value ? value : null;
 }
 
+function durationOf(payload: Record<string, unknown>, field: string): string | null {
+  const value = payload[field];
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? String(Number(value.toFixed(2))) : null;
+}
+
 export function speakerChip(payload: Record<string, unknown>): SpeakerChip | null {
   const state = payload.speaker_state;
   // Events recorded before the reason existed carry no state at all: draw nothing
@@ -72,7 +78,7 @@ export function speakerChip(payload: Record<string, unknown>): SpeakerChip | nul
     const name = payload.speaker_name;
     const detail = confidence;
     if (typeof name === "string" && name) {
-      return { label: name, detail, tone: "known", title: `声纹判定为${name}，置信度 ${detail ?? "未知"}` };
+      return { label: name, detail, tone: "known", title: `声纹匹配为${name}，匹配分数 ${detail ?? "未知"}（并非识别正确率）` };
     }
     // A confirmed match we cannot name is still not a name to invent.
     return { label: "未知身份", detail, tone: "unsure", title: "匹配成功但人物没有名字，请检查人物名单" };
@@ -85,8 +91,15 @@ export function speakerChip(payload: Record<string, unknown>): SpeakerChip | nul
   // Prefer the score when there is one: it is the number used to calibrate the
   // threshold. Otherwise say what actually went wrong.
   const detail = confidence ?? (reason ? REASON_LABEL[reason] ?? null : null);
-  const title = reason ? REASON_TITLE[reason] ?? "没有给出可用的声纹判定" : "没有给出可用的声纹判定";
-  return { label: "未识别", detail, tone: "unsure", title };
+  let title = reason ? REASON_TITLE[reason] ?? "没有给出可用的声纹判定" : "没有给出可用的声纹判定";
+  if (reason === "too_short") {
+    const audio = durationOf(payload, "speaker_audio_seconds");
+    const minimum = durationOf(payload, "speaker_min_seconds");
+    if (audio !== null && minimum !== null) {
+      title = `本次录音 ${audio} 秒，声纹至少 ${minimum} 秒才尝试判断身份；这不影响文字识别。可以再说一句完整的话。`;
+    }
+  }
+  return { label: state === "uncertain" ? "未确认" : "未判定", detail, tone: "unsure", title };
 }
 
 export function speakerChipText(chip: SpeakerChip): string {

@@ -181,6 +181,30 @@ def test_no_verdict_still_publishes_why_there_is_none():
     assert fields == {"speaker_state": "unknown", "speaker_reason": "too_short"}
 
 
+def test_short_clip_event_reports_recording_length_and_configured_minimum():
+    """A short ASR sentence can be understood without yielding a usable voiceprint."""
+    fields = speaker_fields(
+        None, None, "too_short", audio_seconds=0.82, min_seconds=2.4,
+    )
+
+    assert fields == {
+        "speaker_state": "unknown",
+        "speaker_reason": "too_short",
+        "speaker_audio_seconds": 0.82,
+        "speaker_min_seconds": 2.4,
+    }
+    assert "speaker_id" not in fields
+
+
+def test_non_short_failure_does_not_claim_a_recording_length():
+    assert speaker_fields(
+        None, None, "gallery_unavailable", audio_seconds=0.82, min_seconds=1.5,
+    ) == {
+        "speaker_state": "unknown",
+        "speaker_reason": "gallery_unavailable",
+    }
+
+
 def test_voiceprints_being_off_is_reported_as_disabled_not_as_a_failure():
     assert speaker_fields(None, None, "disabled") == {
         "speaker_state": "disabled",

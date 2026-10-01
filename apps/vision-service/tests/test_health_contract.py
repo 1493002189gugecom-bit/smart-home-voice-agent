@@ -46,8 +46,29 @@ def test_runtime_status_uses_capture_frame_time_without_claiming_a_person():
     runtime.error_code = None
     runtime.message = None
     runtime._last_failure = None
+    runtime._published = SimpleNamespace(preview_at_ms=12000)
 
     status = runtime.status()
 
     assert status["last_frame_at_ms"] == 12345
     assert "person_id" not in status
+    assert status["preview_at_ms"] == 12000
+
+
+def test_config_exposes_preview_freshness_and_session_for_browser_reconnection():
+    runtime = SimpleNamespace(
+        status=lambda: {
+            "model_ready": True, "model_error": None, "mode": "monitoring",
+            "camera_room_id": "living_room", "sync_state": "synced",
+            "camera_id": "device:0", "session_id": "session-2",
+            "last_frame_at_ms": 12000, "preview_at_ms": 11900,
+            "actual_mode": None, "error_code": None, "message": None,
+        },
+        config=SimpleNamespace(public_view=lambda: {}),
+    )
+
+    code, payload = VisionApp(runtime).handle("GET", "/config", None)
+
+    assert code == 200
+    assert payload["session_id"] == "session-2"
+    assert payload["preview_at_ms"] == 11900

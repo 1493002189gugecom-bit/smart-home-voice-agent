@@ -65,6 +65,9 @@
 /apps/perception-console/web/node_modules/
 /apps/perception-console/web/dist/
 /apps/perception-console/web/*.tsbuildinfo
+# Android Studio keeps device selection, workspace state and SDK hints locally.
+/apps/perception-console/web/.idea/
+/apps/perception-console/web/android/.idea/
 !/apps/device-simulator/
 /apps/device-simulator/*
 !/apps/device-simulator/src/

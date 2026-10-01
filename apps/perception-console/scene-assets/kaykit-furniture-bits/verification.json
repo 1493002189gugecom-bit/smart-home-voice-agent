@@ -1,0 +1,1226 @@
+{
+  "loaded": 53,
+  "total": 53,
+  "failures": [],
+  "geometry": [
+    {
+      "id": "kaykit/armchair",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 528,
+        "bounds_min": [
+          -0.9000000953674316,
+          0,
+          -0.75
+        ],
+        "bounds_max": [
+          0.9000000953674316,
+          1.2240597009658813,
+          0.8500000238418579
+        ],
+        "size": [
+          1.8000001907348633,
+          1.2240597009658813,
+          1.600000023841858
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/armchair_pillows",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 614,
+        "bounds_min": [
+          -0.9000000953674316,
+          0,
+          -0.75
+        ],
+        "bounds_max": [
+          0.9000000953674316,
+          1.2240597009658813,
+          0.8500000238418579
+        ],
+        "size": [
+          1.8000001907348633,
+          1.2240597009658813,
+          1.600000023841858
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/bed_double_A",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 540,
+        "bounds_min": [
+          -1.5499999523162842,
+          0,
+          -1.5
+        ],
+        "bounds_max": [
+          1.5499999523162842,
+          0.9999999403953552,
+          1.5
+        ],
+        "size": [
+          3.0999999046325684,
+          0.9999999403953552,
+          3
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/bed_double_B",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 600,
+        "bounds_min": [
+          -1.5500000715255737,
+          0,
+          -1.5
+        ],
+        "bounds_max": [
+          1.5499999523162842,
+          0.9999999403953552,
+          1.5
+        ],
+        "size": [
+          3.100000023841858,
+          0.9999999403953552,
+          3
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/bed_single_A",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 474,
+        "bounds_min": [
+          -0.800000011920929,
+          0,
+          -1.5
+        ],
+        "bounds_max": [
+          0.800000011920929,
+          0.9999999403953552,
+          1.5
+        ],
+        "size": [
+          1.600000023841858,
+          0.9999999403953552,
+          3
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/bed_single_B",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 534,
+        "bounds_min": [
+          -0.800000011920929,
+          0,
+          -1.5
+        ],
+        "bounds_max": [
+          0.800000011920929,
+          0.9999999403953552,
+          1.5
+        ],
+        "size": [
+          1.600000023841858,
+          0.9999999403953552,
+          3
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/book_set",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 196,
+        "bounds_min": [
+          -0.389999121427536,
+          -0.2499997317790985,
+          -0.17745713889598846
+        ],
+        "bounds_max": [
+          0.3900008499622345,
+          0.25000014901161194,
+          0.18754282593727112
+        ],
+        "size": [
+          0.7799999713897705,
+          0.49999988079071045,
+          0.3649999648332596
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/book_single",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 68,
+        "bounds_min": [
+          -0.12999913096427917,
+          -0.2499997317790985,
+          -0.17745713889598846
+        ],
+        "bounds_max": [
+          0.13000085949897766,
+          0.25000014901161194,
+          0.18754282593727112
+        ],
+        "size": [
+          0.25999999046325684,
+          0.49999988079071045,
+          0.3649999648332596
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/cabinet_medium",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 428,
+        "bounds_min": [
+          -1,
+          -7.450580596923828e-9,
+          -0.5
+        ],
+        "bounds_max": [
+          1,
+          1,
+          0.5015586018562317
+        ],
+        "size": [
+          2,
+          1.0000000074505806,
+          1.0015586018562317
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/cabinet_medium_decorated",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 1018,
+        "bounds_min": [
+          -1,
+          -7.450580596923828e-9,
+          -0.5
+        ],
+        "bounds_max": [
+          1.0416327714920044,
+          1.827033281326294,
+          0.5015586018562317
+        ],
+        "size": [
+          2.0416327714920044,
+          1.8270332887768745,
+          1.0015586018562317
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/cabinet_small",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 322,
+        "bounds_min": [
+          -0.5,
+          -7.450580596923828e-9,
+          -0.5
+        ],
+        "bounds_max": [
+          0.5,
+          1,
+          0.5015586018562317
+        ],
+        "size": [
+          1,
+          1.0000000074505806,
+          1.0015586018562317
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/cabinet_small_decorated",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 464,
+        "bounds_min": [
+          -0.544425368309021,
+          -7.450580596923828e-9,
+          -0.5
+        ],
+        "bounds_max": [
+          0.5032453536987305,
+          1.6175150871276855,
+          0.6038827896118164
+        ],
+        "size": [
+          1.0476707220077515,
+          1.6175150945782661,
+          1.1038827896118164
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/cactus_medium_A",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 448,
+        "bounds_min": [
+          -0.4399626851081848,
+          0.0000018132850527763367,
+          -0.4184218943119049
+        ],
+        "bounds_max": [
+          0.43994686007499695,
+          0.8272479176521301,
+          0.4184219241142273
+        ],
+        "size": [
+          0.8799095451831818,
+          0.8272461043670774,
+          0.8368438184261322
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/cactus_medium_B",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 448,
+        "bounds_min": [
+          -0.4399626851081848,
+          0.0000018132850527763367,
+          -0.4184218943119049
+        ],
+        "bounds_max": [
+          0.43994686007499695,
+          0.8272479176521301,
+          0.4184219241142273
+        ],
+        "size": [
+          0.8799095451831818,
+          0.8272461043670774,
+          0.8368438184261322
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/cactus_small_A",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 252,
+        "bounds_min": [
+          -0.24999238550662994,
+          -3.6954881466044753e-7,
+          -0.24999842047691345
+        ],
+        "bounds_max": [
+          0.25000762939453125,
+          0.5516003370285034,
+          0.25000157952308655
+        ],
+        "size": [
+          0.5000000149011612,
+          0.5516007065773181,
+          0.5
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/cactus_small_B",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 252,
+        "bounds_min": [
+          -0.24999238550662994,
+          -3.6954881466044753e-7,
+          -0.24999842047691345
+        ],
+        "bounds_max": [
+          0.25000762939453125,
+          0.5516003370285034,
+          0.25000157952308655
+        ],
+        "size": [
+          0.5000000149011612,
+          0.5516007065773181,
+          0.5
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/chair_A",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 308,
+        "bounds_min": [
+          -0.375,
+          -7.450580596923828e-9,
+          -0.47012859582901
+        ],
+        "bounds_max": [
+          0.375,
+          1.2583259344100952,
+          0.3749999403953552
+        ],
+        "size": [
+          0.75,
+          1.2583259418606758,
+          0.8451285362243652
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/chair_A_wood",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 308,
+        "bounds_min": [
+          -0.375,
+          -7.450580596923828e-9,
+          -0.47012859582901
+        ],
+        "bounds_max": [
+          0.375,
+          1.2583259344100952,
+          0.3749999403953552
+        ],
+        "size": [
+          0.75,
+          1.2583259418606758,
+          0.8451285362243652
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/chair_B",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 384,
+        "bounds_min": [
+          -0.3749847412109375,
+          -7.450580596923828e-9,
+          -0.47012859582901
+        ],
+        "bounds_max": [
+          0.3750152587890625,
+          1.2583259344100952,
+          0.3749999403953552
+        ],
+        "size": [
+          0.75,
+          1.2583259418606758,
+          0.8451285362243652
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/chair_B_wood",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 384,
+        "bounds_min": [
+          -0.3749847412109375,
+          -7.450580596923828e-9,
+          -0.47012859582901
+        ],
+        "bounds_max": [
+          0.3750152587890625,
+          1.2583259344100952,
+          0.3749999403953552
+        ],
+        "size": [
+          0.75,
+          1.2583259418606758,
+          0.8451285362243652
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/chair_C",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 288,
+        "bounds_min": [
+          -0.3750152587890625,
+          -7.450580596923828e-9,
+          -0.560621440410614
+        ],
+        "bounds_max": [
+          0.3749847412109375,
+          1.2029427289962769,
+          0.375
+        ],
+        "size": [
+          0.75,
+          1.2029427364468575,
+          0.935621440410614
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/chair_stool",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 216,
+        "bounds_min": [
+          -0.3749847412109375,
+          -7.450580596923828e-9,
+          -0.3750000596046448
+        ],
+        "bounds_max": [
+          0.3750152587890625,
+          0.5,
+          0.3749999403953552
+        ],
+        "size": [
+          0.75,
+          0.5000000074505806,
+          0.75
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/chair_stool_wood",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 216,
+        "bounds_min": [
+          -0.3749847412109375,
+          -7.450580596923828e-9,
+          -0.3750000596046448
+        ],
+        "bounds_max": [
+          0.3750152587890625,
+          0.5,
+          0.3749999403953552
+        ],
+        "size": [
+          0.75,
+          0.5000000074505806,
+          0.75
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/couch",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 636,
+        "bounds_min": [
+          -1.5000001192092896,
+          0,
+          -0.75
+        ],
+        "bounds_max": [
+          1.5000001192092896,
+          1.2240597009658813,
+          0.8500000238418579
+        ],
+        "size": [
+          3.000000238418579,
+          1.2240597009658813,
+          1.600000023841858
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/couch_pillows",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 808,
+        "bounds_min": [
+          -1.5000001192092896,
+          0,
+          -0.75
+        ],
+        "bounds_max": [
+          1.5000001192092896,
+          1.2240597009658813,
+          0.8500000238418579
+        ],
+        "size": [
+          3.000000238418579,
+          1.2240597009658813,
+          1.600000023841858
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/lamp_standing",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 320,
+        "bounds_min": [
+          -0.5,
+          -1.1920928955078125e-7,
+          -0.5000000596046448
+        ],
+        "bounds_max": [
+          0.5,
+          2.5199999809265137,
+          0.4999999403953552
+        ],
+        "size": [
+          1,
+          2.5200001001358032,
+          1
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/lamp_table",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 392,
+        "bounds_min": [
+          -0.5,
+          -0.0016652223421260715,
+          -0.5000000596046448
+        ],
+        "bounds_max": [
+          0.5,
+          1.0199999809265137,
+          0.4999999403953552
+        ],
+        "size": [
+          1,
+          1.0216652032686397,
+          1
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/pictureframe_large_A",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 60,
+        "bounds_min": [
+          -0.5000000596046448,
+          -0.6000000238418579,
+          -3.7620480952682556e-8
+        ],
+        "bounds_max": [
+          0.5100000500679016,
+          0.6000000238418579,
+          0.20000004768371582
+        ],
+        "size": [
+          1.0100001096725464,
+          1.2000000476837158,
+          0.20000008530419677
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/pictureframe_large_B",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 60,
+        "bounds_min": [
+          -1,
+          -0.6000000834465027,
+          -3.7620480952682556e-8
+        ],
+        "bounds_max": [
+          1.0000001192092896,
+          0.6000000834465027,
+          0.20000004768371582
+        ],
+        "size": [
+          2.0000001192092896,
+          1.2000001668930054,
+          0.20000008530419677
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/pictureframe_medium",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 60,
+        "bounds_min": [
+          -0.3500000536441803,
+          -0.4500000476837158,
+          -3.7620480952682556e-8
+        ],
+        "bounds_max": [
+          0.3500000536441803,
+          0.4500000476837158,
+          0.20000004768371582
+        ],
+        "size": [
+          0.7000001072883606,
+          0.9000000953674316,
+          0.20000008530419677
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/pictureframe_small_A",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 60,
+        "bounds_min": [
+          -0.2500000596046448,
+          -0.30000007152557373,
+          -3.7620480952682556e-8
+        ],
+        "bounds_max": [
+          0.2500000596046448,
+          0.30000007152557373,
+          0.20000004768371582
+        ],
+        "size": [
+          0.5000001192092896,
+          0.6000001430511475,
+          0.20000008530419677
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/pictureframe_small_B",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 60,
+        "bounds_min": [
+          -0.3500000536441803,
+          -0.22000005841255188,
+          -3.7620480952682556e-8
+        ],
+        "bounds_max": [
+          0.3500000536441803,
+          0.22000005841255188,
+          0.20000004768371582
+        ],
+        "size": [
+          0.7000001072883606,
+          0.44000011682510376,
+          0.20000008530419677
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/pictureframe_small_C",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 60,
+        "bounds_min": [
+          -0.2500000596046448,
+          -0.2500000596046448,
+          -3.7620480952682556e-8
+        ],
+        "bounds_max": [
+          0.2500000596046448,
+          0.2500000596046448,
+          0.20000004768371582
+        ],
+        "size": [
+          0.5000001192092896,
+          0.5000001192092896,
+          0.20000008530419677
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/pictureframe_standing_A",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 74,
+        "bounds_min": [
+          -0.25,
+          -0.0010237395763397217,
+          -0.2082117199897766
+        ],
+        "bounds_max": [
+          0.25,
+          0.6175150871276855,
+          0.1712580770254135
+        ],
+        "size": [
+          0.5,
+          0.6185388267040253,
+          0.3794697970151901
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/pictureframe_standing_B",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 74,
+        "bounds_min": [
+          -0.3500000238418579,
+          -0.00021269917488098145,
+          -0.18568862974643707
+        ],
+        "bounds_max": [
+          0.3500000834465027,
+          0.46797534823417664,
+          0.1713285744190216
+        ],
+        "size": [
+          0.7000001072883606,
+          0.4681880474090576,
+          0.3570172041654587
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/pillow_A",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 86,
+        "bounds_min": [
+          -0.32500001788139343,
+          -0.09999999403953552,
+          -0.25
+        ],
+        "bounds_max": [
+          0.32499998807907104,
+          0.10000000149011612,
+          0.2500000596046448
+        ],
+        "size": [
+          0.6500000059604645,
+          0.19999999552965164,
+          0.5000000596046448
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/pillow_B",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 86,
+        "bounds_min": [
+          -0.32500001788139343,
+          -0.09999999403953552,
+          -0.25
+        ],
+        "bounds_max": [
+          0.32499998807907104,
+          0.10000000149011612,
+          0.2500000596046448
+        ],
+        "size": [
+          0.6500000059604645,
+          0.19999999552965164,
+          0.5000000596046448
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/rug_oval_A",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 176,
+        "bounds_min": [
+          -1.5,
+          0,
+          -1
+        ],
+        "bounds_max": [
+          1.5,
+          0.09999996423721313,
+          1
+        ],
+        "size": [
+          3,
+          0.09999996423721313,
+          2
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/rug_oval_B",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 176,
+        "bounds_min": [
+          -1.5,
+          0,
+          -1
+        ],
+        "bounds_max": [
+          1.5,
+          0.09999996423721313,
+          1
+        ],
+        "size": [
+          3,
+          0.09999996423721313,
+          2
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/rug_rectangle_A",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 44,
+        "bounds_min": [
+          -1.5,
+          0,
+          -1
+        ],
+        "bounds_max": [
+          1.5,
+          0.09999996423721313,
+          1
+        ],
+        "size": [
+          3,
+          0.09999996423721313,
+          2
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/rug_rectangle_B",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 44,
+        "bounds_min": [
+          -1.5,
+          0,
+          -1
+        ],
+        "bounds_max": [
+          1.5,
+          0.09999996423721313,
+          1
+        ],
+        "size": [
+          3,
+          0.09999996423721313,
+          2
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/rug_rectangle_stripes_A",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 68,
+        "bounds_min": [
+          -1.5,
+          0,
+          -1
+        ],
+        "bounds_max": [
+          1.5,
+          0.09999996423721313,
+          1
+        ],
+        "size": [
+          3,
+          0.09999996423721313,
+          2
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/rug_rectangle_stripes_B",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 68,
+        "bounds_min": [
+          -1.5,
+          0,
+          -1
+        ],
+        "bounds_max": [
+          1.5,
+          0.09999996423721313,
+          1
+        ],
+        "size": [
+          3,
+          0.09999996423721313,
+          2
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/shelf_A_big",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 212,
+        "bounds_min": [
+          -1,
+          -0.29999980330467224,
+          1.4901161193847656e-8
+        ],
+        "bounds_max": [
+          1,
+          0.10000019520521164,
+          0.5000000596046448
+        ],
+        "size": [
+          2,
+          0.3999999985098839,
+          0.5000000447034836
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/shelf_A_small",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 212,
+        "bounds_min": [
+          -0.5,
+          -0.29999980330467224,
+          1.4901161193847656e-8
+        ],
+        "bounds_max": [
+          0.5,
+          0.10000019520521164,
+          0.5000000596046448
+        ],
+        "size": [
+          1,
+          0.3999999985098839,
+          0.5000000447034836
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/shelf_B_large",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 212,
+        "bounds_min": [
+          -1,
+          -0.10000038146972656,
+          -1.1970611168976575e-8
+        ],
+        "bounds_max": [
+          1.0000001192092896,
+          0.30000028014183044,
+          0.5000000596046448
+        ],
+        "size": [
+          2.0000001192092896,
+          0.400000661611557,
+          0.5000000715752559
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/shelf_B_large_decorated",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 482,
+        "bounds_min": [
+          -1,
+          -0.10000038146972656,
+          -1.1970611168976575e-8
+        ],
+        "bounds_max": [
+          1.0000001192092896,
+          0.7175151109695435,
+          0.5000000596046448
+        ],
+        "size": [
+          2.0000001192092896,
+          0.81751549243927,
+          0.5000000715752559
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/shelf_B_small",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 212,
+        "bounds_min": [
+          -0.5,
+          -0.10000038146972656,
+          -1.1970611168976575e-8
+        ],
+        "bounds_max": [
+          0.5000001192092896,
+          0.30000028014183044,
+          0.5000000596046448
+        ],
+        "size": [
+          1.0000001192092896,
+          0.400000661611557,
+          0.5000000715752559
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/shelf_B_small_decorated",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 532,
+        "bounds_min": [
+          -0.5,
+          -0.10000038146972656,
+          -1.1970611168976575e-8
+        ],
+        "bounds_max": [
+          0.5000001192092896,
+          0.9116003513336182,
+          0.5713372826576233
+        ],
+        "size": [
+          1.0000001192092896,
+          1.0116007328033447,
+          0.5713372946282345
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/table_low",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 276,
+        "bounds_min": [
+          -1.2000000476837158,
+          0,
+          -0.75
+        ],
+        "bounds_max": [
+          1.2000000476837158,
+          0.5,
+          0.75
+        ],
+        "size": [
+          2.4000000953674316,
+          0.5,
+          1.5
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/table_medium",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 168,
+        "bounds_min": [
+          -1,
+          -7.450580596923828e-9,
+          -1
+        ],
+        "bounds_max": [
+          1,
+          1,
+          1
+        ],
+        "size": [
+          2,
+          1.0000000074505806,
+          2
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/table_medium_long",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 168,
+        "bounds_min": [
+          -1.5,
+          -7.450580596923828e-9,
+          -1
+        ],
+        "bounds_max": [
+          1.5,
+          1,
+          1
+        ],
+        "size": [
+          3,
+          1.0000000074505806,
+          2
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    },
+    {
+      "id": "kaykit/table_small",
+      "geometry": {
+        "mesh_count": 1,
+        "triangle_count": 168,
+        "bounds_min": [
+          -0.5,
+          -7.450580596923828e-9,
+          -0.5
+        ],
+        "bounds_max": [
+          0.5,
+          1,
+          0.5
+        ],
+        "size": [
+          1,
+          1.0000000074505806,
+          1
+        ],
+        "unit": "source-unit (placement scale to be calibrated)"
+      }
+    }
+  ]
+}

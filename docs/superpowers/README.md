@@ -26,12 +26,23 @@
 
 | 文件 | 内容 | 状态 | 完成进展 |
 | --- | --- | --- | --- |
-| [`plans/2026-09-25-project-roadmap.md`](plans/2026-09-25-project-roadmap.md) | P0-1…P2 共 11 项任务、技术栈决策、4 个实施批次 | 计划 2026-09-25；多数未实施 | P0-1、P0-2 与 P0-6 源码推进，真人/连续运行验收待做；P0-3、P0-4 已实现待真人验收（见路线图进展表） |
+| [`plans/2026-09-25-project-roadmap.md`](plans/2026-09-25-project-roadmap.md) | P0-1…P2 共 11 项任务、技术栈决策、4 个实施批次；新增 09-30“我的家”视图方向 | 计划 2026-09-25；多数未实施 | P0-1、P0-2 与 P0-6 源码推进；P0-3、P0-4 有实现基础但问题待修复；09-30 网页示意视图源码与本地视觉检查已完成，真实设备验收待做（见路线图进展表） |
 
 ## 2. 进行中的专项计划
 
+2026-10-01 提交前回归：终端/HA 90 项、语音 97 项、视觉 22 项、前端 23 项通过，网页构建及 193 个素材校验通过；真实设备与平板体验仍按各专项计划验收。见[GitHub 提交前检查](reports/2026-10-01-github-upload-check.md)。
+
+2026-10-01 素材进度：用户已选择 KayKit 为主选，53 个家具模型和原始贴图已保存，53/53 在浏览器中加载/渲染成功并生成单品预览；18 个优先候选，Kenney 140 个模型保留为储备。当前 Three.js 只有灯开关效果，亮度、空调气流及家具替换仍待实施。见[素材与设备效果计划](plans/2026-10-01-threejs-assets-and-device-effects.md)和[家具库](../../apps/perception-console/scene-assets/README.md)。
+
+终端视觉进度：2026-10-01 已将电脑六个页面统一为“我的家”的深色风格，导航、标题、边距在桌面与平板宽度下保持一致。见[统一主题报告](reports/2026-10-01-console-unified-theme.md)。
+
+2026-10-01 新进度：“我的家”第二版已增加电脑/平板设备手动控制，采用胶囊开关、亮度滑轨和操作后自动同步；APK 已更新，真实设备效果与平板手感待验收。见[第二版报告](reports/2026-10-01-manual-device-control-v2.md)。
+
 | 文件 | 计划时间 | 状态 | 下一步 / 卡在哪 |
 | --- | --- | --- | --- |
+| [`plans/2026-10-01-threejs-assets-and-device-effects.md`](plans/2026-10-01-threejs-assets-and-device-effects.md) | 2026-10-01 | KayKit 主选 53/53 浏览器加载渲染通过；**场景接入与设备效果扩展待实施** | 18 个 KayKit 优先候选；补齐厨房、空调/插座/传感器，按确认快照实现灯亮度和气流；平板性能与设备效果待真人验收 |
+| [`plans/2026-09-26-voice-intent-and-audio-integrity.md`](plans/2026-09-26-voice-intent-and-audio-integrity.md) | 2026-09-26 | **计划与现场诊断已完成；本次修复未实施** | P0-3：舒适请求、一次性待续与本轮可信证据；P0-4：录音完整性和插话；模拟验证及真人验收待做 |
+| [`plans/2026-09-30-android-tablet-app.md`](plans/2026-09-30-android-tablet-app.md) | 2026-09-30 | Android 工程与第二版 APK 已完成并 USB 更新；**真实设备与平板体验待验收** | 见[第二版报告](reports/2026-10-01-manual-device-control-v2.md)；核对胶囊开关、亮度滑轨、自动同步与响应速度 |
 | [`plans/2026-09-25-speaker-bound-operation-target.md`](plans/2026-09-25-speaker-bound-operation-target.md) | 2026-09-25 | Phase A 已实现；**Phase B 未实现**（全仓无 `resolve_self_target`） | 做 Phase B 前先补 A9 的 FAR/FRR 实测（当前阈值是估的） |
 | [`plans/2026-09-24-perception-console-ux-registration-audio.md`](plans/2026-09-24-perception-console-ux-registration-audio.md) | 2026-09-24 | 大部分完成（17/25 子项） | 375px 窄屏验收；验收后提交 |
 | [`plans/2026-09-23-local-perception-desktop.md`](plans/2026-09-23-local-perception-desktop.md) | 2026-09-23 | Task 1–2 有记录，Task 3–5 无完成记录 | 启动器、Unity 视觉 UI 移除、静态复核 |

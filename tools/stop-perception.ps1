@@ -36,7 +36,7 @@ for ($pass = 0; $pass -lt 3; $pass++) {
     $byId = @{}
     foreach ($processInfo in $processes) { $byId[[int]$processInfo.ProcessId] = $processInfo }
     $listeners = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
-        Where-Object { $_.LocalPort -in 8765, 8766, 8767, 8770 })
+        Where-Object { $_.LocalPort -in 8765, 8766, 8767, 8770, 8771 })
     $targets = @{}
 
     foreach ($service in $services) {
@@ -84,12 +84,19 @@ for ($pass = 0; $pass -lt 3; $pass++) {
 
 $remaining = @()
 $listeners = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
-    Where-Object { $_.LocalPort -in 8765, 8766, 8767, 8770 })
+    Where-Object { $_.LocalPort -in 8765, 8766, 8767, 8770, 8771 })
 foreach ($service in $services) {
     foreach ($listener in $listeners | Where-Object { $_.LocalPort -eq $service.Port }) {
         $portPid = [int]$listener.OwningProcess
         $processInfo = Get-CimInstance Win32_Process -Filter "ProcessId = $portPid" -ErrorAction SilentlyContinue
         $remaining += "  $($service.Port) <- PID $portPid $($processInfo.Name)"
+    }
+}
+foreach ($listener in $listeners | Where-Object { $_.LocalPort -eq 8771 }) {
+    $portPid = [int]$listener.OwningProcess
+    $processInfo = Get-CimInstance Win32_Process -Filter "ProcessId = $portPid" -ErrorAction SilentlyContinue
+    if (Test-RepositoryProcess -Process $processInfo -Service ($services | Where-Object { $_.Name -eq 'console' } | Select-Object -First 1)) {
+        $remaining += "  8771 <- PID $portPid $($processInfo.Name)"
     }
 }
 
@@ -99,4 +106,4 @@ if ($remaining.Count -gt 0) {
 }
 
 Remove-Item -LiteralPath $manifestPath -Force -ErrorAction SilentlyContinue
-Write-Host "Stopped $($stopped.Count) process(es). Ports 8765/8766/8767/8770 are free."
+Write-Host "Stopped $($stopped.Count) process(es). Ports 8765/8766/8767/8770/8771 are free."

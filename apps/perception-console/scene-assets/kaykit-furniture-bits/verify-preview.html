@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>KayKit 家具加载验证</title>
+<style>
+body{margin:0;padding:24px;background:#111923;color:#e9eef4;font:16px system-ui,"Microsoft YaHei",sans-serif}h1{margin:0 0 8px}p{color:#afbdca}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:12px}article{background:#1b2633;border:1px solid #334352;border-radius:16px;padding:10px}img{display:block;width:100%;aspect-ratio:4/3;object-fit:contain}h3{font-size:14px;margin:8px 0;overflow-wrap:anywhere}#status{position:sticky;top:0;padding:12px;background:#111923}details{margin-top:24px}
+</style>
+<h1>KayKit · 我的家家具候选</h1>
+<p>使用项目 Three.js 渲染原始贴图；这里是素材验证预览，尚未接入房屋视图。</p>
+<p id="status">准备加载…</p>
+<div id="preferred" class="grid"></div>
+<details><summary>其他模型</summary><div id="other" class="grid"></div></details>
+<script type="importmap">{"imports":{"three":"../../web/node_modules/three/build/three.module.js","three/addons/":"../../web/node_modules/three/examples/jsm/"}}</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+const status=document.getElementById('status');
+const catalog=await fetch('../catalog.json').then(r=>r.json());
+const items=catalog.items.filter(item=>item.pack_id==='kaykit-furniture-bits');
+const loader=new GLTFLoader();
+const renderer=new THREE.WebGLRenderer({antialias:true,alpha:true});
+renderer.setSize(320,240);renderer.setPixelRatio(1);
+renderer.outputColorSpace=THREE.SRGBColorSpace;
+renderer.toneMapping=THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure=1.25;
+const scene=new THREE.Scene();
+scene.add(new THREE.AmbientLight(0xffffff,1.7));
+const light=new THREE.DirectionalLight(0xfff3df,3.2);light.position.set(3,5,4);scene.add(light);
+const fill=new THREE.DirectionalLight(0xc6deff,1.0);fill.position.set(-3,2,-2);scene.add(fill);
+const camera=new THREE.OrthographicCamera(-0.95,0.95,0.72,-0.72,0.01,30);
+camera.position.set(2.7,2.0,3.2);camera.lookAt(0,0,0);
+const failures=[];let loaded=0;
+for(const item of items){
+ try{
+  const gltf=await loader.loadAsync('../'+item.file);
+  const bounds=new THREE.Box3().setFromObject(gltf.scene);
+  const size=bounds.getSize(new THREE.Vector3());
+  if(bounds.isEmpty()||!size.toArray().every(Number.isFinite)||size.length()===0)throw new Error('empty geometry');
+  let meshes=0,triangles=0,textureSeen=false;
+  gltf.scene.traverse(o=>{if(o.isMesh){meshes++;triangles+=(o.geometry.index?.count??o.geometry.getAttribute('position').count)/3;for(const m of(Array.isArray(o.material)?o.material:[o.material]))if(m.map?.image?.width>0)textureSeen=true;}});
+  if(!meshes||!textureSeen)throw new Error('geometry or decoded texture missing');
+  item.geometry={mesh_count:meshes,triangle_count:triangles,bounds_min:bounds.min.toArray(),bounds_max:bounds.max.toArray(),size:size.toArray(),unit:'source-unit (placement scale to be calibrated)'};
+  const scale=1.35/Math.max(size.x,size.y,size.z);gltf.scene.scale.setScalar(scale);
+  const center=bounds.getCenter(new THREE.Vector3());gltf.scene.position.copy(center.multiplyScalar(-scale));
+  scene.add(gltf.scene);renderer.render(scene,camera);
+  const card=document.createElement('article');const image=document.createElement('img');
+  image.alt=item.label;image.dataset.assetId=item.id;image.src=renderer.domElement.toDataURL('image/png');
+  const label=document.createElement('h3');label.textContent=item.label;card.append(image,label);
+  document.getElementById(item.preferred?'preferred':'other').append(card);
+  scene.remove(gltf.scene);
+  const textures=new Set();const materials=new Set();const geometries=new Set();
+  gltf.scene.traverse(o=>{if(o.isMesh){geometries.add(o.geometry);for(const m of(Array.isArray(o.material)?o.material:[o.material])){materials.add(m);if(m.map)textures.add(m.map);}}});
+  for(const t of textures){t.dispose();t.image?.close?.();}for(const m of materials)m.dispose();for(const g of geometries)g.dispose();
+  loaded++;
+ }catch(error){failures.push({id:item.id,error:String(error)});}
+ status.textContent=`加载并渲染 ${loaded}/${items.length}，失败 ${failures.length}`;
+}
+renderer.dispose();
+const result=document.createElement('pre');result.id='verification-result';result.hidden=true;
+result.textContent=JSON.stringify({loaded,total:items.length,failures,geometry:items.map(item=>({id:item.id,geometry:item.geometry}))});
+document.body.append(result);document.body.dataset.verification='complete';
+</script>
+</html>

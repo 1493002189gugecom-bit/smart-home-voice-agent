@@ -21,7 +21,7 @@ class Service:
 SERVICES = {
     "home": Service("home", "http://127.0.0.1:8765", {
         "GET": ("/health", "/state", "/snapshot", "/events", "/persons", "/tool/room_status", "/tool/person_location", "/tool/device_status"),
-        "POST": ("/persons",),
+        "POST": ("/persons", "/tool/set_light", "/tool/set_ac", "/tool/set_switch"),
     }),
     "vision": Service("vision", "http://127.0.0.1:8766", {
         "GET": ("/health", "/config", "/cameras", "/results", "/preview.jpg", "/preview.mjpeg", "/registration", "/registrations", "/identity/speaker/status"),

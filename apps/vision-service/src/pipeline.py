@@ -51,6 +51,7 @@ from speaker_registry import SpeakerRegistry
 # Longest edge of the preview JPEG. Small enough to stream at ~1 Hz, large enough
 # to read a name and a pose label.
 PREVIEW_MAX_EDGE = 960
+PREVIEW_STALE_SECONDS = 5.0
 MAX_CONSECUTIVE_FRAME_ERRORS = 3
 DIAGNOSTICS = DiagnosticWriter(component="vision")
 
@@ -161,6 +162,7 @@ class IdentityStabilizer:
 class _Published:
     snapshot: VisionSnapshot
     preview_jpeg: bytes | None
+    preview_at_ms: int | None = None
 
 
 class VisionRuntime:
@@ -171,12 +173,17 @@ class VisionRuntime:
         self.clock = clock
         self.mode = ServiceMode.IDLE
         self.camera_room_id: str | None = None
+        self._room_generation = 0
+        self._room_started_at_ms = 0
         self.source: CameraSource | None = None
         self.error_code: str | None = None
         self.message: str | None = None
         self._last_failure: dict[str, str | int] | None = None
 
         self._lock = threading.RLock()
+        # Ultralytics owns mutable ByteTrack state. A room/source reset must not
+        # run concurrently with model.track(), but status reads must stay free.
+        self._pose_lock = threading.Lock()
         self._published = _Published(
             snapshot=VisionSnapshot(
                 session_id=None, mode=ServiceMode.IDLE, camera_id=None,
@@ -256,6 +263,9 @@ class VisionRuntime:
     # ------------------------------------------------------------- controls
     def select_source(self, source: CameraSource) -> None:
         """Switch camera, withdrawing the previous session before the new one may publish."""
+        with self._lock:
+            if self.source == source and self.mode != ServiceMode.ERROR:
+                return
         if self.mode == ServiceMode.REGISTERING:
             # The camera enrolment was using is going away, so enrolment ends with
             # an explicit reason instead of stalling on frames that never arrive.
@@ -276,7 +286,7 @@ class VisionRuntime:
             self._set_mode(ServiceMode.IDLE)
 
     def select_room(self, room_id: str) -> None:
-        """Switch the logical room, withdrawing the previous session first.
+        """Switch the logical room without reopening the physical camera.
 
         Re-selecting the current room must not disturb a live capture: the room is
         an interpretation of the one physical camera, not a reason to reopen it.
@@ -290,17 +300,32 @@ class VisionRuntime:
             return
         was_monitoring = self.mode == ServiceMode.MONITORING
         was_error = self.mode == ServiceMode.ERROR
+        transition_generation = None
         if was_monitoring:
-            self._begin_transition()
-            self._offline_current("room_changed")
+            # Invalidate processing already in flight, clear the old preview,
+            # and drop the queued frame before publishing under a new room.
+            with self._lock:
+                self._room_generation += 1
+                transition_generation = self._room_generation
+                self._room_started_at_ms = int(self.clock() * 1000)
+                self._set_mode(ServiceMode.IDLE)
+                self.capture.latest_frame.discard()
             self._reset_tracking()
-        self.camera_room_id = room_id
-        if was_monitoring:
-            self.start_monitoring()
-        elif not was_error:
-            # The room does not affect the camera, so a camera or model fault must
-            # survive this call instead of being cleared by it.
-            self._set_mode(ServiceMode.IDLE)
+            self._offline_current("room_changed")
+        with self._lock:
+            self.camera_room_id = room_id
+            if (was_monitoring and self.mode == ServiceMode.IDLE
+                    and self._room_generation == transition_generation):
+                # Work that entered after the first invalidation may still be
+                # finishing inference. Start a fresh generation only after the
+                # tracker reset and offline barrier have both completed.
+                self._room_generation += 1
+                self._room_started_at_ms = int(self.clock() * 1000)
+                self.capture.latest_frame.discard()
+                self._set_mode(ServiceMode.MONITORING)
+            elif not was_monitoring and not was_error and self.mode != ServiceMode.ERROR:
+                # The room does not affect a camera/model fault.
+                self._set_mode(ServiceMode.IDLE)
 
     def start_monitoring(self) -> None:
         if not self._model_ready:
@@ -312,18 +337,34 @@ class VisionRuntime:
         if self.camera_room_id is None:
             self._set_mode(ServiceMode.ERROR, "room_not_selected")
             return
-        # Set the intended mode before the capture thread starts. A camera that
-        # fails immediately may callback before start() returns; its error must
-        # win instead of being overwritten by a late monitoring assignment.
-        self._set_mode(ServiceMode.MONITORING)
-        self.capture.start(self.source)
+        # Keep old in-flight frames blocked while CaptureSession stops its old
+        # owner and assigns a new session. An immediate camera failure callback
+        # must still win over the final monitoring assignment.
+        with self._lock:
+            self._room_generation += 1
+            startup_generation = self._room_generation
+            self._room_started_at_ms = int(self.clock() * 1000)
+            self._set_mode(ServiceMode.IDLE)
+        session_id = self.capture.start(self.source)
+        with self._lock:
+            if session_id is None:
+                if self.mode != ServiceMode.ERROR:
+                    self._set_mode(ServiceMode.ERROR, "camera_open_failed")
+            elif (self.mode == ServiceMode.IDLE and self._room_generation == startup_generation
+                    and self.capture.session_id == session_id):
+                self._set_mode(ServiceMode.MONITORING)
 
     def pause_monitoring(self) -> None:
         self.stop_monitoring(reason="service_stopping")
 
     def stop_monitoring(self, *, reason: str) -> None:
-        if self.mode == ServiceMode.MONITORING:
-            self._set_mode(ServiceMode.IDLE)
+        with self._lock:
+            self._room_generation += 1
+            self._room_started_at_ms = int(self.clock() * 1000)
+            was_monitoring = self.mode == ServiceMode.MONITORING
+            if was_monitoring:
+                self._set_mode(ServiceMode.IDLE)
+        if was_monitoring:
             self._offline_current(reason)
         self.capture.stop(reason)
         self.sync.mark_not_monitoring()
@@ -375,7 +416,12 @@ class VisionRuntime:
 
     def preview_jpeg(self) -> bytes | None:
         with self._lock:
-            return self._published.preview_jpeg
+            published = self._published
+            if published.preview_jpeg is None or published.preview_at_ms is None:
+                return None
+            if self.clock() * 1000 - published.preview_at_ms > PREVIEW_STALE_SECONDS * 1000:
+                return None
+            return published.preview_jpeg
 
     def registration_status(self) -> RegistrationStatus | None:
         with self._lock:
@@ -392,6 +438,7 @@ class VisionRuntime:
                 "camera_room_id": self.camera_room_id,
                 "session_id": self.capture.session_id,
                 "last_frame_at_ms": self.capture.last_frame_at_ms,
+                "preview_at_ms": self._published.preview_at_ms,
                 "actual_mode": self.capture.actual_mode,
                 "sync_state": self.sync.sync_state,
                 "error_code": self.error_code,
@@ -402,15 +449,20 @@ class VisionRuntime:
     # ------------------------------------------------------------- internals
     def _reset_tracking(self) -> None:
         """Drop tracker, identity and pose evidence belonging to the old session."""
-        self._tracks.clear()
-        self.identity.reset()
-        self.pose_states.reset_session()
-        self.pose.reset_session()
+        with self._pose_lock:
+            self.pose.reset_session()
+        with self._lock:
+            self._tracks.clear()
+            self.identity.reset()
+            self.pose_states.reset_session()
 
     def _begin_transition(self) -> None:
         # In-flight processing checks this mode before publishing, which prevents
         # a frame from the previous source/room leaking past the offline barrier.
-        self._set_mode(ServiceMode.IDLE)
+        with self._lock:
+            self._room_generation += 1
+            self._room_started_at_ms = int(self.clock() * 1000)
+            self._set_mode(ServiceMode.IDLE)
         self.capture.stop("source_changed")
 
     def _offline_current(self, reason: str) -> None:
@@ -483,7 +535,9 @@ class VisionRuntime:
             frame = self.capture.latest_frame.take(timeout=0.5)
             if frame is None:
                 continue
-            session_id = self.capture.session_id
+            with self._lock:
+                session_id = self.capture.session_id
+                room_generation = self._room_generation
             try:
                 self._process(frame)
                 consecutive_errors = 0
@@ -497,12 +551,12 @@ class VisionRuntime:
                                      error_code="frame_processing_error")
                 # An in-flight frame can fail while a control request switches the
                 # source. Never let that old frame poison the new session.
-                if self.capture.session_id != session_id or self.mode not in (
-                    ServiceMode.MONITORING, ServiceMode.REGISTERING
-                ):
-                    consecutive_errors = 0
-                    continue
                 with self._lock:
+                    if (self.capture.session_id != session_id
+                            or self._room_generation != room_generation
+                            or self.mode not in (ServiceMode.MONITORING, ServiceMode.REGISTERING)):
+                        consecutive_errors = 0
+                        continue
                     self._last_failure = _failure_location(exc)
                 consecutive_errors += 1
                 if consecutive_errors < MAX_CONSECUTIVE_FRAME_ERRORS:
@@ -524,8 +578,13 @@ class VisionRuntime:
             return
 
         session_id = self.capture.session_id or ""
+        with self._lock:
+            room_generation = self._room_generation
+            if frame.captured_at_ms <= self._room_started_at_ms:
+                return
         started = time.perf_counter()
-        bodies: list[BodyTrack] = self.pose.process(frame, session_id)
+        with self._pose_lock:
+            bodies: list[BodyTrack] = self.pose.process(frame, session_id)
         pose_ms = (time.perf_counter() - started) * 1000
         self._frame_index += 1
         measure = self._frame_index % 30 == 0
@@ -554,18 +613,23 @@ class VisionRuntime:
                 ranking = candidates[0] if candidates else None
             ranked[body.track_id] = ranking
 
-        observations = self._build_observations(bodies, ranked, frame.captured_at_ms)
+        with self._lock:
+            if (self.mode != ServiceMode.MONITORING or self.capture.session_id != session_id
+                    or self._room_generation != room_generation):
+                return
+            observations = self._build_observations(bodies, ranked, frame.captured_at_ms)
         # Controls run on HTTP threads while inference runs here. Re-check the
         # ownership boundary after the expensive work so a stale in-flight frame
         # cannot publish after a pause or session replacement.
-        if self.mode != ServiceMode.MONITORING or self.capture.session_id != session_id:
-            return
         render_started = time.perf_counter()
-        self._publish(observations, frame)
+        if not self._publish(observations, frame, expected_room_generation=room_generation,
+                             expected_session_id=session_id):
+            return
         if measure:
             DIAGNOSTICS.emit("render", observation_id=observation_id,
                              duration_ms=(time.perf_counter() - render_started) * 1000)
-        self._push_to_home(frame)
+        self._push_to_home(frame, expected_room_generation=room_generation,
+                           expected_session_id=session_id)
         if measure:
             DIAGNOSTICS.emit("frame", observation_id=observation_id,
                              duration_ms=(time.perf_counter() - started) * 1000)
@@ -593,6 +657,7 @@ class VisionRuntime:
             self._published = _Published(
                 snapshot=self._published.snapshot,
                 preview_jpeg=preview_jpeg,
+                preview_at_ms=frame.captured_at_ms,
             )
         face_started = time.perf_counter()
         faces = self.faces.analyze(frame.frame_bgr)
@@ -678,32 +743,41 @@ class VisionRuntime:
             )
         return observations
 
-    def _publish(self, observations: list[TrackObservation], frame) -> None:
-        snapshot = VisionSnapshot(
-            session_id=self.capture.session_id,
-            mode=ServiceMode.MONITORING,
-            camera_id=self.source.redacted_label if self.source else None,
-            camera_room_id=self.camera_room_id,
-            observed_at_ms=frame.captured_at_ms,
-            sync_state=self.sync.sync_state,
-            tracks=tuple(observations),
-        )
+    def _publish(self, observations: list[TrackObservation], frame, *, expected_room_generation: int,
+                 expected_session_id: str | None = None) -> bool:
         preview = self._render_preview(frame.frame_bgr, observations)
         with self._lock:
-            self._published = _Published(snapshot=snapshot, preview_jpeg=preview)
+            if (self.mode != ServiceMode.MONITORING or self._room_generation != expected_room_generation
+                    or (expected_session_id is not None and self.capture.session_id != expected_session_id)):
+                return False
+            snapshot = VisionSnapshot(
+                session_id=self.capture.session_id,
+                mode=ServiceMode.MONITORING,
+                camera_id=self.source.redacted_label if self.source else None,
+                camera_room_id=self.camera_room_id,
+                observed_at_ms=frame.captured_at_ms,
+                sync_state=self.sync.sync_state,
+                tracks=tuple(observations),
+            )
+            self._published = _Published(snapshot=snapshot, preview_jpeg=preview, preview_at_ms=frame.captured_at_ms)
+            return True
 
-    def _push_to_home(self, frame) -> None:
-        session_id = self.capture.session_id
-        if session_id is None or self.source is None or self.camera_room_id is None:
-            return
-        snapshot = self.snapshot()
-        self.sync.submit({
-            "camera_id": self.source.redacted_label,
-            "camera_room_id": self.camera_room_id,
-            "session_id": session_id,
-            "observed_at_ms": frame.captured_at_ms,
-            "observations": [track.to_dict() for track in snapshot.tracks],
-        })
+    def _push_to_home(self, frame, *, expected_room_generation: int,
+                      expected_session_id: str | None = None) -> None:
+        with self._lock:
+            session_id = self.capture.session_id
+            if (self.mode != ServiceMode.MONITORING or self._room_generation != expected_room_generation
+                    or (expected_session_id is not None and session_id != expected_session_id)
+                    or session_id is None or self.source is None or self.camera_room_id is None):
+                return
+            snapshot = self._published.snapshot
+            self.sync.submit({
+                "camera_id": self.source.redacted_label,
+                "camera_room_id": self.camera_room_id,
+                "session_id": session_id,
+                "observed_at_ms": frame.captured_at_ms,
+                "observations": [track.to_dict() for track in snapshot.tracks],
+            })
 
     def _render_preview(self, frame_bgr, observations: list[TrackObservation]) -> bytes | None:
         """Mirror the preview for the person facing the screen, then draw readable overlays.

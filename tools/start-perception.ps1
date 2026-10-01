@@ -13,7 +13,8 @@ param(
     [string]$HomeBackend = 'ha',
     [ValidateRange(5, 300)]
     [int]$TimeoutSeconds = 60,
-    [switch]$NoWindow
+    [switch]$NoWindow,
+    [switch]$TabletView
 )
 
 $ErrorActionPreference = 'Stop'
@@ -27,6 +28,16 @@ $visionPython = Join-Path $repoRoot '.venv-vision\Scripts\python.exe'
 if (-not (Test-Path $frontendIndex -PathType Leaf)) {
     Write-Warning 'Perception UI is not built. Run npm install and npm run build in apps\perception-console\web first.'
     exit 2
+}
+if ($TabletView) {
+    $builtAt = (Get-Item -LiteralPath $frontendIndex).LastWriteTimeUtc
+    $frontendRoot = Join-Path $repoRoot 'apps\perception-console\web'
+    $sources = @(Get-ChildItem -LiteralPath (Join-Path $frontendRoot 'src') -Recurse -File |
+        Where-Object { $_.Extension -in '.ts', '.tsx', '.css' })
+    $sources += @(Get-Item -LiteralPath (Join-Path $frontendRoot 'package.json'), (Join-Path $frontendRoot 'index.html'))
+    if (@($sources | Where-Object { $_.LastWriteTimeUtc -gt $builtAt }).Count -gt 0) {
+        throw 'Tablet UI build is older than its source. Run npm run build in apps\perception-console\web first.'
+    }
 }
 
 if (-not (Test-Path $python -PathType Leaf)) {
@@ -60,6 +71,14 @@ function Test-Endpoint {
         return $response.StatusCode -ge 200 -and $response.StatusCode -lt 300
     }
     catch { return $false }
+}
+
+function Test-TabletView {
+    $consolePort = Get-NetTCPConnection -State Listen -LocalPort 8770 -ErrorAction SilentlyContinue | Select-Object -First 1
+    $tabletPort = Get-NetTCPConnection -State Listen -LocalPort 8771 -ErrorAction SilentlyContinue | Select-Object -First 1
+    return $null -ne $consolePort -and $null -ne $tabletPort -and `
+        $consolePort.OwningProcess -eq $tabletPort.OwningProcess -and `
+        (Test-Endpoint -Uri 'http://127.0.0.1:8771/health')
 }
 
 function Test-OwnedEntry {
@@ -120,6 +139,9 @@ $services = @(
         Arguments = @(); Health = 'http://127.0.0.1:8770/health'
     }
 )
+if ($TabletView) {
+    ($services | Where-Object { $_.Name -eq 'console' }).Arguments = @('--tablet-port', '8771')
+}
 
 $owned = @(Get-OwnedProcesses)
 $failures = @()
@@ -140,14 +162,23 @@ foreach ($service in $services) {
             Start-Sleep -Milliseconds 500
         }
         Write-Host "[$($service.Name)] ready on 127.0.0.1:$($service.Port)"
+        if ($service.Name -eq 'console' -and $TabletView -and -not (Test-TabletView)) {
+            throw 'Existing console has no tablet view. Run tools\stop-perception.ps1, then start again with -TabletView.'
+        }
         continue
     }
     if ((Test-Endpoint -Uri $service.Health) -and (Test-ServicePortOwner -Service $service)) {
+        if ($service.Name -eq 'console' -and $TabletView -and -not (Test-TabletView)) {
+            throw 'Existing console has no tablet view. Run tools\stop-perception.ps1, then start again with -TabletView.'
+        }
         Write-Host "[$($service.Name)] ready on 127.0.0.1:$($service.Port) (existing process)"
         continue
     }
     if (Test-ListeningPort -Port $service.Port) {
         throw "[$($service.Name)] port $($service.Port) is occupied, but it is not a ready service from this project. Run tools\stop-perception.ps1 and inspect the port owner."
+    }
+    if ($service.Name -eq 'console' -and $TabletView -and (Test-ListeningPort -Port 8771)) {
+        throw '[console] tablet port 8771 is occupied; inspect its owner before starting the tablet view.'
     }
     $runKind = 'cold'
     if (-not (Test-Path $service.Python -PathType Leaf)) {
@@ -192,12 +223,18 @@ foreach ($service in $services) {
     Write-Host "[$($service.Name)] started (PID $($process.Id)); waiting for health"
     $serviceDeadline = (Get-Date).AddSeconds($TimeoutSeconds)
     while (-not ((Test-Endpoint -Uri $service.Health) -and (Test-ServicePortOwner -Service $service))) {
+        if ($process.HasExited) {
+            throw "[$($service.Name)] process exited before health became ready."
+        }
         if ((Get-Date) -gt $serviceDeadline) {
             throw "[$($service.Name)] did not become ready within $TimeoutSeconds seconds on port $($service.Port)."
         }
         Start-Sleep -Milliseconds 500
     }
     Write-Host "[$($service.Name)] ready on 127.0.0.1:$($service.Port)"
+    if ($service.Name -eq 'console' -and $TabletView -and -not (Test-TabletView)) {
+        throw '[console] tablet view did not become ready on 127.0.0.1:8771.'
+    }
     }
     catch {
         # A model, device or credential fault must not prevent the console from
@@ -226,6 +263,9 @@ $consoleReady = (Test-Endpoint -Uri 'http://127.0.0.1:8770/health') -and `
     (Test-ServicePortOwner -Service ($services | Where-Object { $_.Name -eq 'console' }))
 if ($consoleReady) {
     Write-Host 'Perception center is ready at http://127.0.0.1:8770/'
+    if ($TabletView -and (Test-TabletView)) {
+        Write-Host 'Tablet home view is ready at http://127.0.0.1:8771/tablet (PC only until a private HTTPS tunnel is configured).'
+    }
     try {
         $statusResponse = Invoke-WebRequest -Uri 'http://127.0.0.1:8770/api/status' -UseBasicParsing -TimeoutSec 8
         $statusBody = $statusResponse.Content | ConvertFrom-Json

@@ -1,0 +1,14 @@
+{
+  "author": "Kenney",
+  "pack": "Furniture Kit",
+  "archive_version": "2.0 (License.txt)",
+  "source_url": "https://kenney.nl/assets/furniture-kit",
+  "download_url": "https://kenney.nl/media/pages/assets/furniture-kit/440e0608a4-1677580847/kenney_furniture-kit.zip",
+  "license": "CC0-1.0",
+  "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+  "retrieved_on": "2026-10-01",
+  "archive_sha256": "e67652d0932cee41683f74711c03d3e192a2af9979ef8e6b237711f5482d46b0",
+  "archive_bytes": 5130729,
+  "stored_glb_count": 140,
+  "note": "Original GLBs and one isometric thumbnail per model. Source archive is retained in ignored runtime/perception/asset-downloads; runtime app does not load this library yet."
+}

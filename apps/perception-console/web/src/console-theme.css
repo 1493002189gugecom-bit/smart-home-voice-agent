@@ -1,0 +1,80 @@
+/* Desktop console shares the house view's navigation, spacing and palette. */
+:root { color-scheme: dark; }
+.shell.home-mode {
+  --paper: #202d46;
+  --canvas: #0a1120;
+  --ink: #eef1f9;
+  --muted: #adb9d0;
+  --line: #3b4a66;
+  --accent: #d5b58b;
+  --accent-dark: #eed4ad;
+  --soft: #2b3954;
+  --warn: #edc8a0;
+  --danger: #ffb9af;
+  --shadow: 0 24px 60px rgb(1 6 16 / 22%);
+  color: var(--ink);
+  color-scheme: dark;
+}
+.home-mode .console-main {
+  max-width: none;
+  min-height: 100vh;
+  padding: clamp(24px, 3vw, 48px);
+  background: radial-gradient(circle at 58% 24%, #273456 0, #111a30 38%, #0a1120 78%);
+}
+.console-main header { align-items: end; gap: 24px; margin-bottom: 24px; }
+.console-main header h1 { margin: 8px 0 3px; font-size: clamp(31px, 3vw, 47px); line-height: 1.08; letter-spacing: -.04em; }
+.console-main header p { font-size: 14px; }
+.console-main header .eyebrow { display: inline; color: #c4aa81; font-size: 11px; letter-spacing: .22em; }
+.console-main .privacy { border-color: #3a5160; background: #1c3042; color: #a8e6d3; }
+.console-main .card { border-color: #394660; border-radius: 23px; background: linear-gradient(155deg, #25314c, #172237 75%); }
+.console-main .service-card { background: rgb(32 43 66 / 67%); }
+.console-main .card-title h2 { color: #f3e4cf; }
+.home-mode .notice, .console-main .notice { border-color: #6b5440; background: #2d2a2c; color: #edc8a0; }
+.console-main :is(.person, .device, .audio-current > div, .service-note) { border-color: #3d4b68; background: #26334e; }
+.console-main .avatar { background: #394865; color: #f3e4cf; }
+.console-main .online { color: #a8e6d3; }
+.home-mode .dot { background: #ed988e; box-shadow: 0 0 0 4px #ed988e20; }
+.home-mode .dot.up { background: #9cdbb8; box-shadow: 0 0 0 4px #9cdbb820; }
+.home-mode .dot.degraded { background: #edc8a0; box-shadow: 0 0 0 4px #edc8a020; }
+.console-main :is(.controls label, .registration-side label, .audio-choice label) { color: #d9e2f0; }
+.console-main :is(input, select) { min-height: 48px; border-color: #74819b; background: #16243b; color: #f4f6fa; }
+.console-main input::placeholder { color: #a1afc5; }
+.home-mode .console-main button { min-height: 48px; border-color: #d5b58b; border-radius: 12px; background: #d5b58b; color: #172239; touch-action: manipulation; }
+.home-mode .console-main button:hover:not(:disabled) { background: #eed4ad; }
+.console-main .secondary { border-color: #728098 !important; background: #35465f !important; color: #eef3fa !important; }
+.console-main .secondary:hover:not(:disabled) { background: #455975 !important; }
+.console-main .danger { border-color: #a97369 !important; background: #452f39 !important; color: #ffb9af !important; }
+.console-main .danger:hover:not(:disabled) { background: #5a3944 !important; }
+.console-main :is(button, select, input):focus-visible { outline: 3px solid #a8e6d3; outline-offset: 3px; }
+.console-main .dialogue { background: #25314c; }
+.console-main .dialogue.user { border: 1px solid #42636a; background: #233f46; }
+.console-main .dialogue.assistant { border-color: #45506b; background: #1b2940; box-shadow: none; }
+.console-main .dialogue :is(strong, p), .console-main .dialogue.user p, .console-main .dialogue.assistant p { color: #eef1f9; }
+.console-main .dialogue.assistant strong { color: #eed4ad; }
+.console-main .speaker-chip.known { background: #2f574a; color: #c6f1dc; }
+.console-main .speaker-chip.unsure { background: #3a4358; color: #d5dbea; }
+.console-main .dialogue.streaming { border-color: #76b99d; background: #1b343b; }
+.console-main .preview { background: linear-gradient(135deg, #1c2942, #0c1425); }
+.console-main .live-badge { background: rgb(28 48 66 / 92%); color: #a8e6d3; }
+.console-main :is(.registration-success, .preview-finished) { border-color: #76b99d; background: #233f3d; color: #d6f3e2; }
+.console-main .identity.selected { border-color: #c9aa7b; box-shadow: 0 0 0 2px #c9aa7b30, var(--shadow); }
+.console-main .guidance { background: #263c47 !important; color: #cce8e3 !important; }
+.console-main .progress { background: #3d4b68; }
+.console-main .progress i { background: #9cdbb8; }
+.console-main :is(.timeline, .event-list, .quality-breakdown) { scrollbar-color: #566680 transparent; }
+@media (min-width: 901px) and (max-height: 900px) and (orientation: landscape) {
+  .home-mode .console-main { padding: 22px clamp(24px, 3vw, 42px) 28px; }
+  .console-main header { margin-bottom: 16px; }
+  .console-main header h1 { font-size: clamp(30px, 3vw, 39px); }
+}
+@media (max-width: 1150px) {
+  .console-main .identity-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 900px) {
+  .home-mode .console-main { padding: 25px 20px 40px; }
+}
+@media (max-width: 620px) {
+  .console-main .identity-grid { grid-template-columns: 1fr; }
+  .console-main header { align-items: start; flex-direction: column; gap: 14px; }
+  .console-main .privacy { white-space: normal; }
+}

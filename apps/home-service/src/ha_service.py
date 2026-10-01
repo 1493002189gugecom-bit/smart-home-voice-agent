@@ -228,16 +228,16 @@ def normalize_entity(record: dict[str, Any], raw: dict[str, Any]) -> dict[str, A
 
 def _error(code: str, operation_id: str | None = None, *, status: str = "rejected") -> dict[str, Any]:
     messages = {
-        "invalid_request": "请求参数无效",
-        "not_found": "设备或房间不存在",
-        "wrong_type": "设备类型不匹配",
+        "invalid_request": "这条设备指令无法执行，请确认设备和调整幅度",
+        "not_found": "没有找到指定的设备或房间",
+        "wrong_type": "选择的设备不支持这项操作",
         "offline": "设备当前离线",
-        "backend_unavailable": "Home Assistant 当前不可用",
-        "backend_invalid_response": "Home Assistant 返回了无效状态",
-        "backend_rejected": "Home Assistant 拒绝了请求",
-        "submission_unknown": "请求提交结果不确定",
-        "confirmation_timeout": "已提交请求，但未观察到目标状态",
-        "operation_id_conflict": "operation_id 已用于不同请求",
+        "backend_unavailable": "暂时无法连接设备，请稍后重试",
+        "backend_invalid_response": "暂时无法确认设备当前状态",
+        "backend_rejected": "设备没有接受这次操作",
+        "submission_unknown": "操作结果暂时无法确认，请查看设备状态",
+        "confirmation_timeout": "已尝试操作，但还没有确认设备达到目标状态",
+        "operation_id_conflict": "这次请求与先前操作冲突，请重新发起",
     }
     return {
         "ok": False,
@@ -251,6 +251,25 @@ def _error(code: str, operation_id: str | None = None, *, status: str = "rejecte
 
 
 def _confirmed(operation_id: str, entity: dict[str, Any], *, noop: bool) -> dict[str, Any]:
+    # Say what the confirmation read actually observed. A generic success
+    # message leaves the user unable to tell whether an AC was switched off.
+    state = entity["state"]
+    name = entity["name"]
+    if state.get("on") is False:
+        phrase = f"{name}{'已经' if noop else '已'}关闭"
+    elif state.get("on") is True:
+        phrase = f"{name}{'已经' if noop else '已'}打开"
+        if entity["type"] == "ac":
+            mode = state.get("mode")
+            if mode in _MODE_NAMES and mode != "off":
+                phrase += f"，{_MODE_NAMES[mode]}模式"
+            target_temp = state.get("target_temp")
+            if mode == "cool" and target_temp is not None:
+                phrase += f"，设定 {target_temp:g} 度"
+        elif entity["type"] == "light" and state.get("brightness") is not None:
+            phrase += f"，亮度 {state['brightness']}%"
+    else:
+        phrase = "设备已经处于目标状态" if noop else "设备状态已更新"
     data = {
         "device": entity["id"],
         "state": entity["state"],
@@ -264,7 +283,7 @@ def _confirmed(operation_id: str, entity: dict[str, Any], *, noop: bool) -> dict
         "error_code": None,
         "operation_id": operation_id,
         "status": "confirmed",
-        "phrase": "设备已经处于目标状态" if noop else "已从 Home Assistant 确认设备状态",
+        "phrase": phrase,
     }
 
 
@@ -907,7 +926,7 @@ class HAServiceApp:
             return (
                 desired,
                 calls,
-                f"已按本地设定把{record['name']}开到{_MODE_NAMES.get(mode, mode)}，{comfort:g} 度",
+                f"{record['name']}已打开，{_MODE_NAMES.get(mode, mode)}模式，设定 {comfort:g} 度",
             )
 
         current = state.get("target_temp")

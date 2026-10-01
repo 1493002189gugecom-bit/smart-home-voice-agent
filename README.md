@@ -49,6 +49,10 @@ cd E:\smart-home
 
 启动脚本退出码：`0` 表示四项服务及终端状态正常，`1` 表示终端可打开但有组件或窗口需要处理，`2` 表示终端不可用。终端“服务在线”只代表 HTTP 可响应；视觉模型、摄像头出帧和 HA 连接分别显示状态。运行中的旧服务需停止并重启后才会加载新版状态接口。
 
+### Android 平板“我的家”
+
+已安装应用的连接地址填 **`https://iphone16promax.tail285617.ts.net`**（只填根地址，不加 `/tablet` 或端口）。先在电脑打开 Docker Desktop，并运行 `.\tools\start-perception.ps1 -TabletView`；平板 Tailscale 保持连接后，打开“**小屋·我的家**”，填地址并点“连接并查看”。电脑与平板的完整启动、连接检查、故障排查和 Android Studio 更新步骤见[平板完整操作说明](apps/perception-console/README.md#现在完整跑一遍)。第二版支持灯光、空调和插座的手动控制，采用胶囊开关、亮度滑轨与温度加减，操作后自动同步。
+
 诊断只写入 Git 忽略的 `runtime/perception/diagnostics/`，每项服务最多保留当前 1 MiB 加两个轮转文件；关联 ID 在落盘前做 SHA-256 截断，不保存转写、回复、姓名、音视频或凭据。下面的采样只读取现有服务进程，不会打开麦克风或摄像头：
 
 ```powershell
