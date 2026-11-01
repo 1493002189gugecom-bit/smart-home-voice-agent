@@ -34,6 +34,37 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual(report["run_kinds"]["cold"], "未测量")
         self.assertEqual(report["scenarios"]["cold"], "未测量")
 
+    def test_speaker_verdict_records_score_and_audio_length(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            writer = DiagnosticWriter(Path(tmp), "voice")
+            writer.emit("speaker_verdict", trace_id="turn-a", outcome="ok",
+                        error_code="uncertain", confidence=0.5, audio_seconds=1.82)
+            writer.emit("speaker_verdict", trace_id="turn-b", outcome="skipped",
+                        error_code="too_short", audio_seconds=0.9)
+            rows = [json.loads(line) for line in (Path(tmp) / "voice.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(rows[0]["confidence"], 0.5)
+            self.assertEqual(rows[0]["audio_seconds"], 1.82)
+            self.assertEqual(rows[0]["error_code"], "uncertain")
+            # No verdict at all must not fall back to a fabricated score.
+            self.assertNotIn("confidence", rows[1])
+            self.assertEqual(rows[1]["error_code"], "too_short")
+
+    def test_a_similarity_outside_zero_to_one_is_not_recorded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            writer = DiagnosticWriter(Path(tmp), "voice")
+            writer.emit("speaker_verdict", confidence=1.5)
+            writer.emit("speaker_verdict", confidence=float("nan"))
+            writer.emit("speaker_verdict", confidence=True)
+            rows = [json.loads(line) for line in (Path(tmp) / "voice.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertTrue(all("confidence" not in row for row in rows))
+
+    def test_a_negative_audio_length_is_not_recorded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            writer = DiagnosticWriter(Path(tmp), "voice")
+            writer.emit("speaker_verdict", audio_seconds=-1.0)
+            row = json.loads((Path(tmp) / "voice.jsonl").read_text(encoding="utf-8").splitlines()[0])
+            self.assertNotIn("audio_seconds", row)
+
     def test_cross_service_ids_match_after_redaction(self):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)

@@ -20,6 +20,10 @@ def test_every_public_event_type_has_a_field_whitelist():
     assert set(PUBLIC_EVENT_TYPES.values()) <= set(PUBLIC_FIELDS)
 
 
+def test_voice_errors_keep_actionable_details_in_the_public_stream():
+    assert {"stage", "error_code", "message", "error_type"} <= PUBLIC_FIELDS["service_error"]
+
+
 def test_the_transcript_still_carries_its_original_fields():
     assert {"state", "transcript", "seconds"} <= PUBLIC_FIELDS["transcript"]
 

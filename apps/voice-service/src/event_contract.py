@@ -12,6 +12,8 @@ from __future__ import annotations
 PUBLIC_EVENT_TYPES = {
     "ready": "voice_state",
     "wake": "voice_state",
+    "natural_trigger": "voice_state",
+    "ambient_suppressed": "voice_state",
     "idle_timeout": "voice_state",
     "text_session_start": "voice_state",
     "text_session_end": "voice_state",
@@ -31,13 +33,14 @@ PUBLIC_EVENT_TYPES = {
     "agent_interrupted": "playback_state",
     "tts_error": "service_error",
     "agent_error": "service_error",
+    "intent_error": "service_error",
     "voice_error": "service_error",
     "audio_status": "service_error",
 }
 
 # public event type -> exactly the fields that may be published for it
 PUBLIC_FIELDS = {
-    "voice_state": {"state", "keyword", "reason", "barge_in"},
+    "voice_state": {"state", "keyword", "reason", "barge_in", "listening_mode"},
     "transcript": {
         "state", "transcript", "seconds",
         # Speaker fields are published whenever voiceprints are configured, and
@@ -45,6 +48,7 @@ PUBLIC_FIELDS = {
         # enrolled, gallery down). Without it the console cannot tell those apart.
         "speaker_id", "speaker_name", "speaker_confidence", "speaker_state", "speaker_reason",
         "speaker_audio_seconds", "speaker_min_seconds",
+        "audio_event", "emotion", "clipped_ratio",
     },
     "agent_reply": {"state", "text", "ok", "error_code", "end_conversation", "tools", "seconds", "cancelled"},
     # Enrolment progress. `enroll_state` is separate from `state`, which always
@@ -61,5 +65,5 @@ PUBLIC_FIELDS = {
         # much of the new command the interruption already captured.
         "reason", "captured_seconds",
     },
-    "service_error": {"state", "error_type"},
+    "service_error": {"state", "error_type", "error_code", "stage", "message"},
 }

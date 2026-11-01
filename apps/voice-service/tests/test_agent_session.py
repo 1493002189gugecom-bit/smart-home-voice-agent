@@ -30,6 +30,10 @@ class FakeExecutor:
     def schemas(self):
         return [{"type": "function", "function": {"name": "set_light", "parameters": {}}}]
 
+    def catalog(self):
+        return [{"id": "living_room_ac", "name": "客厅空调", "type": "ac", "room_id": "living_room", "room_name": "客厅", "controllable": True},
+                {"id": "bedroom_ac", "name": "卧室空调", "type": "ac", "room_id": "bedroom", "room_name": "卧室", "controllable": True}]
+
     def execute(self, name, arguments, operation_id=None):
         self.calls.append({"name": name, "arguments": arguments, "operation_id": operation_id})
         if self.results:
@@ -278,6 +282,63 @@ def test_relative_request_cannot_be_executed_as_absolute_set_ac():
     assert reply.ok
 
 
+@pytest.mark.parametrize("text", [
+    "客厅空调调低两度，卧室空调设为26度",
+    "客厅空调调低两度然后卧室空调设为26度",
+    "客厅空调调低两度卧室空调设为26度",
+    "客厅空调调低两度卧室空调调成26度",
+    "客厅空调调低两度卧室空调26度",
+])
+@pytest.mark.parametrize("separate_rounds", [False, True])
+def test_mixed_temperature_commands_keep_each_devices_parameters(text, separate_rounds):
+    relative = ToolCall("relative", "adjust_ac", {"device_id": "living_room_ac", "direction": "cooler", "degrees": 2})
+    absolute = ToolCall("absolute", "set_ac", {"device_id": "bedroom_ac", "target_temp": 26})
+    responses = ([ChatResponse(None, [relative]), ChatResponse(None, [absolute])]
+                 if separate_rounds else [ChatResponse(None, [relative, absolute])])
+    client = FakeClient(responses + [ChatResponse("已完成")])
+    executor = FakeExecutor()
+    agent, _ = session(client, executor)
+    assert agent.handle(text).ok
+    assert [(c["name"], c["arguments"]) for c in executor.calls] == [
+        ("adjust_ac", {"device_id": "living_room_ac", "direction": "cooler", "degrees": 2}),
+        ("set_ac", {"device_id": "bedroom_ac", "target_temp": 26}),
+    ]
+
+
+def test_relative_amount_does_not_rewrite_an_ac_power_command():
+    client = FakeClient([ChatResponse(None, [
+        ToolCall("relative", "adjust_ac", {"device_id": "living_room_ac", "direction": "cooler", "degrees": 2}),
+        ToolCall("off", "set_ac", {"device_id": "bedroom_ac", "mode": "off"}),
+    ]), ChatResponse("已完成")])
+    executor = FakeExecutor()
+    agent, _ = session(client, executor)
+    agent.handle("客厅调低两度，卧室关闭空调")
+    assert executor.calls[1]["name"] == "set_ac"
+    assert executor.calls[1]["arguments"] == {"device_id": "bedroom_ac", "mode": "off"}
+
+
+def test_decimal_relative_request_still_corrects_an_absolute_model_guess():
+    client = FakeClient([ChatResponse(None, [ToolCall("ac", "set_ac", {
+        "device_id": "bedroom_ac", "target_temp": 25})]), ChatResponse("已完成")])
+    executor = FakeExecutor()
+    agent, _ = session(client, executor)
+    agent.handle("卧室空调调低0.5度。")
+    assert executor.calls[0]["name"] == "adjust_ac"
+    assert executor.calls[0]["arguments"] == {"device_id": "bedroom_ac", "direction": "cooler", "degrees": 0.5}
+
+
+def test_preceding_absolute_command_does_not_inherit_later_relative_delta():
+    client = FakeClient([ChatResponse(None, [
+        ToolCall("absolute", "set_ac", {"device_id": "bedroom_ac", "target_temp": 26}),
+        ToolCall("relative", "adjust_ac", {"device_id": "living_room_ac", "direction": "cooler", "degrees": 2}),
+    ]), ChatResponse("已完成")])
+    executor = FakeExecutor()
+    agent, _ = session(client, executor)
+    agent.handle("卧室空调26度客厅空调调低两度")
+    assert executor.calls[0]["name"] == "set_ac"
+    assert executor.calls[0]["arguments"] == {"device_id": "bedroom_ac", "target_temp": 26}
+
+
 def test_model_prose_is_discarded_when_a_write_failed():
     """The worst possible outcome is speaking a success the device never had."""
     client = FakeClient([
@@ -373,8 +434,63 @@ def test_deadline_stops_the_turn_before_any_further_tool_runs():
 
     assert reply.ok is False
     assert reply.error_code == "agent_timeout"
-    # The first round already ran; the second tool call must never be reached.
+    # Even the first call is stale when the model returns past the deadline.
+    assert executor.calls == []
+
+
+def test_deadline_between_tools_preserves_first_result_but_blocks_second_write():
+    clock = FakeClock()
+    client = FakeClient([ChatResponse(None, [write_call("first", on=True), write_call("second", brightness=10)])])
+    executor = FakeExecutor()
+    original = executor.execute
+    def slow_execute(*args):
+        result = original(*args)
+        clock.now = 5
+        return result
+    executor.execute = slow_execute
+    agent, _ = session(client, executor, clock=clock, deadline_seconds=5)
+    reply = agent.handle("打开客厅灯并调亮")
+    assert reply.error_code == "agent_timeout"
     assert len(executor.calls) == 1
+    assert len(reply.tool_results) == 1 and reply.tool_results[0].ok
+    assert "已完成" in reply.text
+    # A subsequent conversation must not contain unanswered tool calls.
+    agent.handle("你好")
+    messages = client.messages_seen[-1]
+    for message in messages:
+        if message.get("tool_calls"):
+            ids = {item["id"] for item in message["tool_calls"]}
+            assert ids <= {item.get("tool_call_id") for item in messages if item["role"] == "tool"}
+
+
+@pytest.mark.parametrize("direct", [False, True])
+def test_location_lookup_exhausting_deadline_prevents_write(direct):
+    clock = FakeClock()
+    client = FakeClient([ChatResponse(None, [ToolCall("self", "set_light", {"target": "self", "on": True})])])
+    executor = FakeExecutor()
+    def resolve(*args):
+        clock.now = 5
+        return "living_room_light", "客厅"
+    executor.resolve_self_device = resolve
+    agent, _ = session(client, executor, clock=clock, deadline_seconds=5)
+    reply = agent.handle("开灯" if direct else "帮忙把这里照亮")
+    assert reply.error_code == "agent_timeout"
+    assert executor.calls == []
+
+
+def test_late_text_response_is_not_published_as_success():
+    clock = FakeClock()
+    class LateClient:
+        def chat_stream(self, messages, tools, on_delta, cancel=None):
+            on_delta("迟到的回答")
+            clock.now = 5
+            return ChatResponse("迟到的回答")
+    deltas = []
+    agent, _ = session(LateClient(), FakeExecutor(), clock=clock, deadline_seconds=5)
+    agent.on_delta = deltas.append
+    reply = agent.handle("你好")
+    assert reply.error_code == "agent_timeout"
+    assert deltas == []
 
 
 @pytest.mark.parametrize(

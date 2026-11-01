@@ -6,7 +6,7 @@ certifi==2026.7.22
 cffi==2.1.1
 click==8.5.0
 colorama==0.4.6
-edge-tts==7.2.8
+edge-tts==7.3.1
 frozenlist==1.8.0
 idna==3.19
 iniconfig==2.3.0
@@ -19,6 +19,7 @@ psutil==7.2.2
 pycparser==3.0
 Pygments==2.21.0
 pypinyin==0.55.0
+pywebrtc-audio==0.2.0
 pytest==9.1.1
 sentencepiece==0.2.2
 sherpa-onnx==1.13.8

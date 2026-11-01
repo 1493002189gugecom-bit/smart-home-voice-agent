@@ -1,6 +1,6 @@
 # 我的家：可复用家具素材库
 
-更新：2026-10-01。用户已选择 **KayKit Furniture Bits 为主要家具风格**。已保存免费版 53 个模型、整理为 53 个自包含 GLB，并生成 53 张单品预览；优先候选 18 个。原有 140 个 Kenney 模型保留为储备。素材尚未接入运行中的 Three.js 场景。
+更新：2026-10-01。用户已选择 **KayKit Furniture Bits 为主要家具风格**。已保存免费版 53 个模型、整理为 53 个自包含 GLB，并生成 53 张单品预览；优先候选 18 个。原有 140 个 Kenney 模型保留为储备。现已选取 KayKit 15 种与 Kenney 4 种，共 21 实例进入实际 Three.js 视图和 Android 2.1；完整储备库不自动打包。
 
 ## 当前主选：KayKit
 
@@ -71,3 +71,14 @@ Kenney 后续用于补齐主选库缺少的物品；混用时先核对比例和�
 ```
 
 打开 `http://127.0.0.1:8786/scene-assets/kaykit-furniture-bits/verify-preview.html`，页面显示加载/渲染计数。使用项目已有 `web/node_modules/three`，不是运行中的终端服务。验证后按 Ctrl+C 关闭。日常看图只需双击 `catalog.html`，不需这个预览服务器。
+
+## 运行集成进度
+
+2026-10-20 已通过当前 Blender MCP 从家居工程[导出 glTF Separate](exports/gltf-2026-10-20/README.md)，包含 `.gltf`、`.bin` 和共享 PNG；当前 Solid 预览可用，未把它作为旧 EEVEE 离屏问题已修复的证据。正式网页 `/walkthrough?model=gltf` 已装载该模型，OrbitControls 三种鼠标操作及重置通过，见[作业报告](../../../docs/superpowers/reports/2026-10-20-gltf-orbitcontrols.md)。
+
+2026-10-12 修正布局已[导出 GLB 与 Blender 工程](exports/README.md)，包含三个房间、21 件家具、8 个设备外形及内嵌贴图。已通过 Blender MCP 实际导入和保存，并完成后台读取验证；本机 Blender 图形预览的着色器错误仍需另行处理。
+
+选中子集位于 `../web/public/assets/furniture/`，约 402 KB。配置与加载见 `home-furniture.ts`，图集复用、模型失败回退和卸载已验证。设备效果和缩放标签已实施，验证边界、最终包与真人待验收项见[实施报告](../../../docs/superpowers/reports/2026-10-01-kaykit-device-effects.md)。
+## 2026-11-01 Blender 参考资料归档
+
+Unity 工程已退役，旧工作区独有的 Blender 场景、预览与只读插件已转存到 [blender-reference](blender-reference/README.md)。当前 KayKit 工程、glTF/GLB 模型及网页运行路径保持不变。

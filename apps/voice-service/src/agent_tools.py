@@ -12,12 +12,17 @@ from __future__ import annotations
 
 import json
 import time
+import sys
 import uuid
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from home_auth import home_write_headers
 
 # Device type -> the tool that acts on it.
 TOOL_KIND_BY_TYPE = {"light": "set_light", "ac": "set_ac", "switch": "set_switch"}
@@ -738,11 +743,14 @@ class HomeToolExecutor:
         url = self.base_url + path
         if query:
             url += "?" + urlencode(query)
+        headers = {"Content-Type": "application/json"}
+        if method.upper() == "POST":
+            headers.update(home_write_headers(url))
         request = Request(
             url,
             method=method,
             data=None if body is None else json.dumps(body, ensure_ascii=False).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers=headers,
         )
         try:
             with self.opener.open(request, timeout=self.timeout) as response:

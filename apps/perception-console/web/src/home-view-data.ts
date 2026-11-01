@@ -1,4 +1,5 @@
 export type HomeSnapshot = {
+  backend?: string;
   generated_at_ms?: number;
   rooms?: Array<Record<string, unknown>>;
   devices?: Array<Record<string, unknown>>;
@@ -11,6 +12,7 @@ export type RoomView = {
   id: RoomId;
   name: string;
   temperature: number | null;
+  temperatureSimulated: boolean;
   devices: Array<Record<string, unknown>>;
   people: string[];
   lightOn: boolean | null;
@@ -44,7 +46,8 @@ export function buildRoomViews(snapshot: HomeSnapshot, stale: boolean): RoomView
     return {
       id,
       name: typeof room?.name === "string" ? room.name : name,
-      temperature: stale ? null : finiteNumber(room?.simulated_temp) ?? finiteNumber(sensorState.temperature),
+      temperature: stale ? null : finiteNumber(sensorState.temperature) ?? finiteNumber(room?.simulated_temp),
+      temperatureSimulated: !stale && (snapshot.backend==='memory' || finiteNumber(sensorState.temperature)===null && finiteNumber(room?.simulated_temp)!==null),
       devices: roomDevices,
       people: stale ? [] : people,
       lightOn: stale || light?.online !== true || typeof lightState.on !== "boolean" ? null : lightState.on,

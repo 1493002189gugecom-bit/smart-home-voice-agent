@@ -7,6 +7,29 @@ Unity, and does not decide anything by itself: the Agent (Phase D) will call it.
 It binds to **127.0.0.1 only**. Requests to bind anywhere else are refused,
 because this service is never exposed to the LAN.
 
+## Local HTTP write boundary
+
+POST requests require `Content-Type: application/json`, one valid
+`Content-Length` (at most 1 MiB), and a UTF-8 JSON object. Chunked bodies,
+duplicate lengths, and malformed input are rejected before device dispatch.
+Body reads have a five-second timeout. Host must name this loopback listener;
+when Origin is present it must match that host and port exactly.
+
+Device, person-directory and broadcast writes also require `X-Home-Token`.
+On startup, home-service creates `runtime/home-service/write.token` once;
+the voice executor, console proxy and HA acceptance tool read it locally.
+The credential is separate from Home Assistant and vision credentials and is
+never sent to the browser, model, read-only viewers, or diagnostic logs.
+`HOME_SERVICE_WRITE_TOKEN_FILE` can select a different local file, but all
+participating processes must use the same path. An invalid file causes startup
+to fail instead of silently replacing the credential.
+
+Vision ingress continues to use `X-Vision-Token`; that token grants no device
+write permission. GET snapshots and SSE remain available to local read-only
+clients without the write credential. Custom POST clients must read the local
+token file and include its value in the request header. Restart the stack after
+upgrading so the service and its clients use the matching protocol.
+
 ## Read-only live events
 
 `GET /events` exposes a loopback-only Server-Sent Events stream for digital

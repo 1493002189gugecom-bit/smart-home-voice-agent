@@ -1,13 +1,14 @@
-"""Wake-once continuous local voice loop with the cloud Agent.
+"""Hybrid semantic admission and wake-once continuous voice with the cloud Agent.
 
 Behavior:
 - Uses a working system-default microphone first, with physical-device fallbacks.
-- Standby listens only for one of the configured wake words.
+- Hybrid listening transcribes VAD utterances and admits household intent using
+  a separate tool-free classifier. Keyword-only standby remains selectable.
 - After waking, VAD segments continuous utterances and SenseVoice transcribes.
 - With `--agent`, the transcript is routed through the cloud LLM, which may call
   the restricted home-service tools; the reply is spoken with the configured TTS.
   Without it the loop speaks a fixed acknowledgement and touches no device.
-- The active session returns to standby after the idle timeout without a
+- The active session returns to natural listening (or keyword standby) after the idle timeout without a
   completed utterance, or immediately on "退出"/"结束对话".
 - The user may talk over the assistant. While a reply plays, or while the cloud
   model is still being asked, sustained speech stops that work and becomes the
@@ -49,6 +50,8 @@ import config
 import device_preferences
 import playback
 import voice_models
+from agent_client import AgentCancelled
+from ambient_intent import AmbientHistory, create_intent_classifier
 from barge_in import (
     BargeInMonitor,
     BargeInSettings,
@@ -63,11 +66,23 @@ from event_bus import VoiceEventBus
 from event_contract import PUBLIC_EVENT_TYPES, PUBLIC_FIELDS
 from speaker import SpeakerEmbedder
 from speaker_identity import SpeakerIdentityClient
+from text_conversation import TextConversation
+from text_speech import TextSpeechMailbox
+from voice_runtime import StopSignal, CombinedCancel, VoiceCancelled
+from voice_stages import TurnStages
+from intent_evaluation import IntentEvaluation
+from audio_processing import MicrophoneProcessor, acoustic_summary
+from voice_errors import failure_details
 
 BLOCK_SIZE = 512
 IDLE_TIMEOUT_SECONDS = 20.0
 MAX_UTTERANCE_SECONDS = 15.0
+# How much audio before speech onset is kept. The command path needs only enough to
+# avoid clipping the first syllable, but the wake path reuses this ring to keep the
+# wake phrase itself: a measured "你好小屋" is 1.12 s, and without it a short command
+# is the whole utterance and the speaker gate rejects it as too_short.
 PRE_ROLL_BLOCKS = 10
+WAKE_PRE_ROLL_BLOCKS = 64
 MIN_VAD_SPEECH_SECONDS = 0.18
 DIAGNOSTICS = DiagnosticWriter(component="voice")
 # Streamed answer coalescing. Small enough to still look like typing, sparse
@@ -155,6 +170,7 @@ def play_with_barge(
     detector: PlaybackBargeIn,
     barge_queue: queue.Queue,
     on_stream_started: Callable[[float], None] | None = None,
+    *, cancel=None,
 ) -> str | None:
     """Play a reply; return why it stopped: "speech", "wake", or None if finished."""
 
@@ -162,6 +178,9 @@ def play_with_barge(
         detector.speech.start_playback(reference=samples, reference_rate=sample_rate)
 
     def should_interrupt() -> bool:
+        if cancel is not None and cancel.is_set():
+            detector.reason = "cancelled"
+            return True
         return detector.poll(barge_queue, config.SAMPLE_RATE) is not None
 
     completed = play(samples, sample_rate, target, on_stream_started, should_interrupt)
@@ -211,6 +230,31 @@ def is_non_command_filler(transcript: str) -> bool:
     return bool(compact) and all(char in "嗯啊呃额哦唔" for char in compact)
 
 
+def strip_wake_phrases(transcript: str, wake_phrases) -> str:
+    """Remove the wake phrase from the front of a transcript.
+
+    The wake audio is kept so the utterance is long enough to identify a speaker, so
+    the phrase the user spoke to wake the assistant comes back from ASR and is not
+    part of the instruction. Only a leading phrase is removed: "你好小屋" inside a
+    sentence is content, and rewriting it would change what the user said.
+
+    Whitespace and the punctuation the user paused with are cleaned up afterwards, so
+    "你好小屋，把灯打开" becomes "把灯打开" rather than "，把灯打开".
+    """
+
+    text = (transcript or "").strip()
+    for phrase in sorted(wake_phrases or (), key=len, reverse=True):
+        if text.startswith(phrase):
+            text = text[len(phrase):]
+            break
+    return re.sub(r"^[\s，。！？,.!?、~～…：；:;]+", "", text).strip()
+
+
+def seed_wake_vad(vad, blocks) -> int:
+    """Restore segmentation state from retained wake audio and count real speech."""
+    return sum(1 for block in blocks if vad.is_speech(block))
+
+
 def has_enough_voiced_audio(voiced_blocks: int, sample_rate: int) -> bool:
     """A short noise burst cannot pass merely because the buffer has pre-roll."""
     return voiced_blocks * BLOCK_SIZE >= MIN_VAD_SPEECH_SECONDS * sample_rate
@@ -232,11 +276,15 @@ def play(
     should_interrupt: Callable[[], bool] | None = None,
 ) -> bool:
     """Play through the verified target, reporting stream latency once."""
-    return playback.play(
-        samples, sample_rate, target,
-        on_stream_started=on_stream_started,
-        should_interrupt=should_interrupt,
-    )
+    try:
+        return playback.play(
+            samples, sample_rate, target,
+            on_stream_started=on_stream_started,
+            should_interrupt=should_interrupt,
+        )
+    finally:
+        if playback.reference_sink is not None:
+            playback.reference_sink.end_reference()
 
 
 def wake_tone(sample_rate: int = 24000) -> np.ndarray:
@@ -323,12 +371,16 @@ def speaker_fields(
     }
 
 
-def start_enrollment(person_id, *, required, embedder, identity, directory_reader, active_session):
+def start_enrollment(person_id, *, required, embedder, identity, directory_reader, active_session,
+                     accumulate=None):
     """Decide whether an enrolment may start, and say why not when it may not.
 
     Pure policy: everything it needs is passed in, so the refusal rules — no model,
     one enrolment at a time, an id the directory does not know — are provable without
     a microphone or a running service.
+
+    ``accumulate`` is threaded through to the gallery so a second enrolment keeps the
+    first one's voiceprints; `None` leaves the gallery's own default in place.
     """
 
     if embedder is None or identity is None:
@@ -339,9 +391,10 @@ def start_enrollment(person_id, *, required, embedder, identity, directory_reade
         return None, {"ok": False, "error_code": "person_directory_unavailable", "message": "人物名单暂不可用，请检查 home-service"}
     if person_id not in directory_reader():
         return None, {"ok": False, "error_code": "unknown_person", "message": "请先在身份页添加该人物"}
+    options = {} if accumulate is None else {"accumulate": bool(accumulate)}
     session = VoiceEnrollmentSession(
         person_id,
-        save=lambda pid, embeddings: identity.enroll_person(pid, embeddings),
+        save=lambda pid, embeddings: identity.enroll_person(pid, embeddings, **options),
         required=required,
     )
     return session, {"ok": True, "enrollment": session.status().to_dict()}
@@ -470,6 +523,8 @@ def initialize_voice(args, preferences):
         print(f"output: {output_target.describe()}")
     print(f"model root: {config.models_dir()}")
     print("text mode: microphone and speech models are not used" if args.text else "loading KWS/VAD/ASR/TTS ...")
+    if ((not args.text and config.asr_provider() == "funasr") or (not args.no_tts and config.tts_provider() == "cosyvoice")) and not config.dashscope_key():
+        raise VoiceStartupError("speech_api_key_missing")
     try:
         kws = None if args.text else voice_models.create_kws(args.keywords_file)
         vad = None if args.text else voice_models.create_vad()
@@ -496,6 +551,8 @@ def main() -> int:
     parser.add_argument("--input-contains", "--input-device", dest="input_contains", default=None)
     parser.add_argument("--output-contains", "--output-device", dest="output_contains", default=None)
     parser.add_argument("--idle-timeout", type=float, default=IDLE_TIMEOUT_SECONDS)
+    parser.add_argument("--listening-mode", choices=("wake", "hybrid"), default=config.listening_mode(),
+                        help="hybrid: semantic admission without a wake word; wake: keyword only")
     parser.add_argument("--log-file", type=Path, default=None, help="opt-in diagnostic log; may contain conversation text")
     parser.add_argument("--speaker-id", type=int, default=47)
     parser.add_argument("--no-tts", action="store_true", help="print only; useful for diagnostics")
@@ -600,16 +657,34 @@ def main() -> int:
             identity=speaker_identity,
             directory_reader=getattr(getattr(agent, "executor", None), "person_names", None),
             active_session=enrollment,
+            accumulate=config.speaker_enrollment_accumulates(),
         )
         if session is not None:
             enrollment = session
         return payload
 
+    text_conversation = None
+    text_speech = TextSpeechMailbox()
+    speech_stop = StopSignal()
+    def stop_reply():
+        speech_stop.stop()
+        text_speech.stop()
+        if text_conversation is not None:
+            text_conversation.cancel()
+        return {"ok": True, "message": "已请求停止回复；已确认的设备操作仍然有效。"}
+    evaluation = IntentEvaluation(lambda: create_intent_classifier(agent))
+
+    def submit_text(body):
+        if text_conversation is None:
+            return {"ok": False, "error_code": "text_unavailable", "message": "文字对话未就绪，请启用 Agent 并重启语音服务"}
+        return text_conversation.submit(body)
+
     control_server = None
     if not args.no_control_api and not args.startup_check:
         control_server = create_control_server(
             event_bus, args.control_host, args.control_port,
-            on_select=select_devices, on_identity=identity_handler,
+            on_select=select_devices, on_identity=identity_handler, on_text=submit_text,
+            on_stop=stop_reply, evaluation=evaluation,
         )
         start_control_server(control_server)
         print(f"voice control API: http://{args.control_host}:{args.control_port}")
@@ -669,6 +744,20 @@ def main() -> int:
             event_bus.publish(public_type, source_event=event, **safe)
 
     if agent is not None:
+        def strip_typed_wake(text):
+            phrases = config.wake_words(args.keywords_file)
+            return strip_wake_phrases(text, phrases) if any(text.startswith(phrase) for phrase in phrases) else text
+
+        text_conversation = TextConversation(
+            lambda: agent_session.create_agent_session(
+                config.agent_api_key(), args.service_url,
+                deadline_seconds=args.agent_deadline, max_tool_rounds=args.agent_max_tool_rounds,
+            ),
+            event_bus,
+            strip_wake=strip_typed_wake,
+            announce=text_speech.submit if tts is not None and not args.text else None,
+        )
+        event_bus.health_summary["text_chat_enabled"] = True
         # The sentence is shown while it is being written, so a slow turn is
         # visible instead of silent. Transient by design: a streamed answer must
         # not evict the conversation from the bounded event history.
@@ -703,12 +792,25 @@ def main() -> int:
     barge_listening = False
     overflow_count = 0
 
+    processor = MicrophoneProcessor(config.SAMPLE_RATE)
+    selected_asr = config.asr_provider()
+    playback.reference_sink = processor
+    recognition_session = None
+    event_bus.health_summary.update({"audio_processing": processor.status,
+        "asr_provider": selected_asr, "tts_provider": getattr(tts, "provider", None),
+        "speech_api_configured": bool(config.dashscope_key()), "stop_supported": True,
+        "intent_evaluation_enabled": agent is not None})
+
     def callback(indata, frames, time_info, status):  # noqa: ANN001
         nonlocal overflow_count
         if status:
             print(f"audio status: {status}", file=sys.stderr)
             log_event("audio_status", status=str(status))
-        block = np.asarray(indata[:, 0], dtype=np.float32).copy()
+        raw_block = np.asarray(indata[:, 0], dtype=np.float32).copy()
+        captured_at = time.monotonic()
+        if time_info is not None:
+            captured_at -= max(0, float(time_info.currentTime - time_info.inputBufferAdcTime))
+        block = processor.process(raw_block, captured_at)
         try:
             route_microphone_block(
                 audio_queue, barge_queue, block,
@@ -718,16 +820,54 @@ def main() -> int:
         except queue.Full:
             overflow_count += 1
 
-    state = "standby"
+    classifier = None
+    intent_error_code = None
+    if args.listening_mode == "hybrid" and agent is not None:
+        try:
+            classifier = create_intent_classifier(agent)
+        except ValueError:
+            intent_error_code = "intent_configuration_missing"
+            log_event("intent_error", state="degraded", error_type="intent_configuration_missing")
+            print("[intent] 配置不完整，保留唤醒词模式", file=sys.stderr)
+    hybrid = classifier is not None
+    rest_state = "listening" if hybrid else "standby"
+    state = rest_state
+    active_origin = None
+    ambient_actor = None
+    ambient_history = AmbientHistory()
+    intent_client = getattr(classifier, "client", None)
+    event_bus.health_summary.update({
+        "listening_mode": "hybrid" if hybrid else "wake",
+        "requested_listening_mode": args.listening_mode,
+        "intent_provider": getattr(intent_client, "provider", None),
+        "intent_model": getattr(intent_client, "model", None),
+        "intent_status": "ready" if hybrid else "configuration_error" if intent_error_code else "disabled",
+        "intent_error_code": intent_error_code,
+    })
     kws_stream = kws.create_stream()
     active_deadline = 0.0
     pre_roll: collections.deque[np.ndarray] = collections.deque(maxlen=PRE_ROLL_BLOCKS)
+    # A longer ring lives only while standby is listening for the wake word, so the
+    # phrase itself can be recovered the moment it is detected. It is not used to
+    # seed ordinary command utterances, where a long pre-roll would prepend room
+    # noise to every sentence.
+    wake_ring: collections.deque[np.ndarray] = collections.deque(maxlen=WAKE_PRE_ROLL_BLOCKS)
+    merge_wake = config.wake_command_merge_enabled()
     utterance: list[np.ndarray] = []
     in_speech = False
+    utterance_token = None
     voiced_blocks = 0
+    wake_seeded = False
+    trailing_silence_blocks = 0
+    discarding_ambient = False
+    end_silence_blocks = max(1, int(np.ceil(
+        config.command_end_silence_seconds() * config.SAMPLE_RATE / BLOCK_SIZE
+    )))
 
     wake_phrases = config.wake_words(args.keywords_file)
-    if wake_phrases:
+    if hybrid:
+        print("ready: 可以直接说家居需求，也可以继续使用唤醒词（Ctrl+C 退出）")
+    elif wake_phrases:
         spoken = "或".join(f"“{phrase}”" for phrase in wake_phrases)
         print(f"ready: 请说{spoken}（Ctrl+C 退出）")
     else:
@@ -763,6 +903,7 @@ def main() -> int:
         wake_words=wake_phrases,
         agent_enabled=agent is not None,
         barge_in=barge_detector is not None,
+        listening_mode="hybrid" if hybrid else "wake",
     )
     run_deadline = time.monotonic() + args.run_seconds if args.run_seconds > 0 else None
     try:
@@ -778,6 +919,39 @@ def main() -> int:
             stream_scope.callback(lambda: live_stream.close())
             live_stream.start()
             while True:
+                speech_request = text_speech.take()
+                if speech_request is not None:
+                    # Typed speech shares the selected output and never overlaps
+                    # a microphone reply. Suppress input so TTS cannot wake itself.
+                    accept_input = barge_listening = False
+                    if recognition_session is not None:
+                        recognition_session.close()
+                        recognition_session = None
+                    utterance.clear()
+                    pre_roll.clear()
+                    wake_ring.clear()
+                    utterance_token = None
+                    in_speech = wake_seeded = discarding_ambient = False
+                    voiced_blocks = trailing_silence_blocks = 0
+                    vad.reset()
+                    kws_stream = kws.create_stream()
+                    drain(audio_queue)
+                    drain(barge_queue)
+                    try:
+                        text_speech.process(
+                            speech_request,
+                            lambda text: tts.synthesize(text, cancel=CombinedCancel(speech_stop.token(), text_speech)) if isinstance(tts, voice_models.TtsEngine) and tts.provider != "kokoro" else synthesize_reply(tts, text, args.speaker_id),
+                            lambda samples, rate, **options: play(samples, rate, output_target, **options),
+                            stream_render=(lambda text, cancel: tts.stream(text, cancel=cancel)) if getattr(tts, "supports_streaming", False) else None,
+                            stream_player=lambda chunks, **options: playback.play_chunks(chunks, output_target, **options),
+                        )
+                    finally:
+                        drain(audio_queue)
+                        drain(barge_queue)
+                        accept_input = True
+                        if state == "active":
+                            active_deadline = deadline_after_reply(args.idle_timeout)
+                    continue
                 try:
                     selection_request = selection_queue.get_nowait()
                 except queue.Empty:
@@ -815,13 +989,22 @@ def main() -> int:
                             "output_device_index": output_target.index if output_target else None,
                             "error_code": None,
                         })
-                        state = "standby"
+                        state = rest_state
+                        active_origin = None
+                        ambient_actor = None
+                        ambient_history.reset()
+                        if agent is not None:
+                            agent.reset()
                         kws_stream = kws.create_stream()
                         vad.reset()
                         pre_roll.clear()
+                        wake_ring.clear()
                         utterance.clear()
+                        wake_seeded = False
+                        in_speech = False
+                        discarding_ambient = False
                         drain(audio_queue)
-                        event_bus.publish("voice_state", state="standby", reason="audio_devices_changed")
+                        event_bus.publish("voice_state", state=rest_state, reason="audio_devices_changed")
                         event_bus.set_selection_status(request_id, "applied")
                     except Exception as exc:
                         code = exc.code if isinstance(exc, VoiceStartupError) else "audio_device_switch_failed"
@@ -837,13 +1020,18 @@ def main() -> int:
                 # the idle deadline must be checked on every iteration rather
                 # than only when queue.get() times out.
                 if should_idle_timeout(state, in_speech, now, active_deadline):
-                    print(f"[timeout] {args.idle_timeout:g} 秒无新语音，回到待唤醒")
-                    log_event("idle_timeout", state="standby", idle_timeout_seconds=args.idle_timeout)
-                    state = "standby"
+                    print(f"[timeout] {args.idle_timeout:g} 秒无新语音，回到{rest_state}")
+                    log_event("idle_timeout", state=rest_state, idle_timeout_seconds=args.idle_timeout)
+                    state = rest_state
+                    active_origin = None
+                    ambient_actor = None
+                    ambient_history.reset()
                     kws_stream = kws.create_stream()
                     vad.reset()
                     pre_roll.clear()
+                    wake_ring.clear()
                     utterance.clear()
+                    wake_seeded = False
                     if agent is not None:
                         agent.reset()
                 try:
@@ -851,7 +1039,14 @@ def main() -> int:
                 except queue.Empty:
                     continue
 
-                if state == "standby":
+                if state in {"standby", "listening"}:
+                    # Keep a bounded copy separate from the ordinary command
+                    # pre-roll. KWS consumes the wake audio before the active
+                    # state exists; without this ring the wake phrase (and the
+                    # short command immediately after it) can never contribute
+                    # to speaker verification.
+                    if merge_wake:
+                        wake_ring.append(block)
                     kws_stream.accept_waveform(config.SAMPLE_RATE, block)
                     while kws.is_ready(kws_stream):
                         kws.decode_stream(kws_stream)
@@ -860,48 +1055,129 @@ def main() -> int:
                             print(f"[wake] {keyword}；进入连续对话")
                             log_event("wake", state="active", keyword=keyword)
                             kws.reset_stream(kws_stream)
-                            accept_input = False
-                            drain(audio_queue)
-                            if output_target is not None:
-                                play(wake_tone(), 24000, output_target)
-                            drain(audio_queue)
-                            accept_input = True
+                            # In merged mode keep recording continuously. A
+                            # blocking acknowledgement with input disabled loses
+                            # exactly the command spoken immediately after wake.
+                            wake_audio = list(wake_ring) if merge_wake else []
+                            wake_ring.clear()
+                            if not merge_wake:
+                                accept_input = False
+                                drain(audio_queue)
+                                if output_target is not None:
+                                    play(wake_tone(), 24000, output_target)
+                                drain(audio_queue)
+                                accept_input = True
                             state = "active"
+                            active_origin = "wake"
+                            discarding_ambient = False
+                            ambient_history.reset()
+                            if agent is not None:
+                                agent.reset()
                             active_deadline = time.monotonic() + args.idle_timeout
                             vad.reset()
                             pre_roll.clear()
-                            utterance.clear()
-                            in_speech = False
+                            utterance = wake_audio
+                            # Replay retained blocks into VAD so the boundary
+                            # follows the complete wake+command utterance, even
+                            # when KWS detects late inside the command. Count
+                            # actual VAD-positive blocks, never invented seconds.
+                            voiced_blocks = seed_wake_vad(vad, wake_audio)
+                            wake_seeded = False
+                            in_speech = bool(wake_audio)
+                            utterance_token = speech_stop.token()
+                            trailing_silence_blocks = 0
                             break
-                    continue
+                    if state != "listening":
+                        continue
 
                 speech = vad.is_speech(block)
+                if discarding_ambient:
+                    trailing_silence_blocks = 0 if speech else trailing_silence_blocks + 1
+                    if trailing_silence_blocks >= end_silence_blocks:
+                        # Ignore the rest of an overlong sentence too: a later
+                        # clause may retract the earlier comfort complaint.
+                        discarding_ambient = False
+                        in_speech = False
+                        vad.reset()
+                        wake_ring.clear()
+                        kws_stream = kws.create_stream()
+                    continue
                 if not in_speech:
                     pre_roll.append(block)
                     if speech:
-                        utterance = list(pre_roll)
+                        if wake_seeded:
+                            # Keep the wake phrase as speaker context, but use
+                            # only the post-wake VAD span as the command onset.
+                            utterance.extend(pre_roll)
+                            wake_seeded = False
+                            voiced_blocks += 1
+                        else:
+                            utterance = list(pre_roll)
+                            voiced_blocks = 1
                         pre_roll.clear()
                         in_speech = True
-                        voiced_blocks = 1
-                elif speech:
+                        utterance_token = speech_stop.token()
+                        trailing_silence_blocks = 0
+                        if selected_asr == "funasr":
+                            from cloud_speech import RealtimeAsr
+                            recognition_session = RealtimeAsr(lambda text: event_bus.publish_transient("asr_partial", text=text, input_mode="microphone") if active_origin == "wake" else None)
+                            for captured in utterance:
+                                recognition_session.feed(captured)
+                else:
+                    # Preserve every block, including an internal pause. Commit
+                    # only after sustained silence, not the first negative VAD.
                     utterance.append(block)
-                    voiced_blocks += 1
-                    if len(utterance) * BLOCK_SIZE >= MAX_UTTERANCE_SECONDS * config.SAMPLE_RATE:
-                        speech = False
+                    if selected_asr == "funasr":
+                        from cloud_speech import RealtimeAsr
+                        if recognition_session is None:
+                            recognition_session = RealtimeAsr(lambda text: event_bus.publish_transient("asr_partial", text=text, input_mode="microphone") if active_origin == "wake" else None)
+                            for captured in utterance:
+                                recognition_session.feed(captured)
+                        else:
+                            recognition_session.feed(block)
+                    if speech:
+                        voiced_blocks += 1
+                        trailing_silence_blocks = 0
+                    else:
+                        trailing_silence_blocks += 1
 
-                if in_speech and not speech:
+                at_length_limit = len(utterance) * BLOCK_SIZE >= MAX_UTTERANCE_SECONDS * config.SAMPLE_RATE
+                if in_speech and (trailing_silence_blocks >= end_silence_blocks or at_length_limit):
+                    if hybrid and active_origin != "wake" and at_length_limit and trailing_silence_blocks < end_silence_blocks:
+                        utterance.clear()
+                        pre_roll.clear()
+                        if recognition_session is not None:
+                            recognition_session.close()
+                            recognition_session = None
+                        discarding_ambient = True
+                        trailing_silence_blocks = 0
+                        log_event("ignored_utterance", state=state, reason="ambient_utterance_too_long")
+                        continue
                     samples = np.concatenate(utterance) if utterance else np.empty(0, dtype=np.float32)
                     utterance.clear()
                     pre_roll.clear()
                     in_speech = False
+                    wake_seeded = False
                     vad.reset()
+                    if state == "listening":
+                        # A completed passive utterance must not seed a later wake.
+                        wake_ring.clear()
+                        kws_stream = kws.create_stream()
                     if not has_enough_voiced_audio(voiced_blocks, config.SAMPLE_RATE):
+                        if recognition_session is not None:
+                            recognition_session.close()
+                            recognition_session = None
                         log_event("ignored_utterance", state=state, reason="too_little_speech")
                         continue
 
                     turn_id = "turn-" + uuid.uuid4().hex
                     turn_started = time.perf_counter()
                     turn_outcome = "ok"
+                    voice_stage = "asr"
+                    turn_stop = utterance_token if utterance_token is not None else speech_stop.token()
+                    utterance_token = None
+                    stages = TurnStages(event_bus.publish, turn_id, "microphone")
+                    stages.start("asr")
                     DIAGNOSTICS.emit("capture", trace_id=turn_id,
                                      duration_ms=len(samples) * 1000 / config.SAMPLE_RATE)
 
@@ -915,6 +1191,21 @@ def main() -> int:
                     barge_head: list[np.ndarray] = []
                     monitor = None
                     transcript = ""
+                    decision = None
+                    new_ambient_session = False
+
+                    def stop_thinking_monitor(*, preserve_pending=False) -> list[np.ndarray]:
+                        nonlocal barge_listening, accept_input
+                        if monitor is None:
+                            return []
+                        monitor.stop()
+                        if not monitor.interrupted and not preserve_pending:
+                            barge_listening = False
+                            return []
+                        accept_input = True
+                        barge_listening = False
+                        return collect_barge_head(barge_detector, barge_queue, keep_pre_roll=True)
+
                     try:
                         if enrollment is not None and enrollment.active:
                             # Enrolment consumes the utterance: no transcript, no
@@ -926,16 +1217,49 @@ def main() -> int:
                             if not status.active:
                                 enrollment = None
                             continue
+                        if turn_stop.is_set():
+                            raise VoiceCancelled("speech_cancelled")
                         t0 = time.perf_counter()
-                        transcript = voice_models.transcribe(asr, samples, config.SAMPLE_RATE)
+                        if recognition_session is not None:
+                            try:
+                                transcript = recognition_session.result(cancel=turn_stop)
+                                auxiliary = voice_models.transcribe(asr, samples, config.SAMPLE_RATE)
+                                transcript = voice_models.Transcript(transcript,
+                                    emotion=getattr(auxiliary, "emotion", ""), event=getattr(auxiliary, "event", ""),
+                                    lang=getattr(auxiliary, "lang", ""))
+                            finally:
+                                recognition_session.close()
+                                recognition_session = None
+                        else:
+                            transcript = voice_models.transcribe(asr, samples, config.SAMPLE_RATE)
+                        acoustic = acoustic_summary(transcript, samples)
+                        if acoustic["invalid_audio"] or (hybrid and active_origin != "wake" and acoustic["non_speech"]
+                                and not any(str(transcript).startswith(phrase) for phrase in wake_phrases)):
+                            turn_outcome = "ignored"
+                            log_event("ignored_utterance", state=state, reason="non_speech_audio")
+                            continue
+                        raw_transcript = transcript
+                        if merge_wake or hybrid:
+                            transcript = strip_wake_phrases(transcript, wake_phrases)
+                        has_spoken_wake = any(raw_transcript.strip().startswith(phrase) for phrase in wake_phrases)
+                        if hybrid and has_spoken_wake and active_origin != "wake":
+                            state, active_origin = "active", "wake"
+                            active_deadline = time.monotonic() + args.idle_timeout
+                            agent.reset()
+                            ambient_history.reset()
+                            log_event("wake", state=state, reason="asr_wake_phrase")
                         asr_seconds = time.perf_counter() - t0
                         DIAGNOSTICS.emit("asr", trace_id=turn_id, duration_ms=asr_seconds * 1000)
-                        print(f"[asr {asr_seconds:.2f}s] {transcript or '<empty>'}")
+                        if not transcript:
+                            log_event("ignored_utterance", state=state, reason="empty_or_wake_only")
+                            continue
                         if is_non_command_filler(transcript):
                             log_event("ignored_utterance", state=state, reason="non_command_filler")
                             continue
                         # Who spoke is evidence about this one sentence, so it is
                         # resolved here and consumed by the next handle() call.
+                        voice_stage = "speaker"
+                        stages.start("speaker")
                         speaker_started = time.perf_counter()
                         verdict, speaker_name, speaker_reason = resolve_speaker(
                             speaker_embedder, speaker_identity,
@@ -944,8 +1268,73 @@ def main() -> int:
                         )
                         DIAGNOSTICS.emit("speaker", trace_id=turn_id,
                                          duration_ms=(time.perf_counter() - speaker_started) * 1000)
+                        # The score and the audio length are the two numbers a
+                        # "why didn't it recognise me" report needs, and neither is
+                        # recoverable after the fact: diagnostics used to record only
+                        # the stage duration, so a low similarity was invisible. The
+                        # identity never leaves here and the name is never recorded.
+                        DIAGNOSTICS.emit(
+                            "speaker_verdict",
+                            trace_id=turn_id,
+                            outcome="ok" if verdict is not None else "skipped",
+                            error_code=(verdict.state if verdict is not None
+                                        else (speaker_reason or "not_evaluated")),
+                            confidence=(verdict.confidence if verdict is not None else None),
+                            audio_seconds=len(samples) / config.SAMPLE_RATE,
+                        )
+                        speaker_id = verdict.person_id if verdict and verdict.usable else None
+                        if hybrid and active_origin != "wake":
+                            if state == "active" and speaker_id is not None and ambient_actor is not None and speaker_id != ambient_actor:
+                                agent.reset()
+                                ambient_history.reset()
+                                state, active_origin = rest_state, None
+                            elif state == "active" and ambient_actor is None and speaker_id is not None:
+                                ambient_history.bind_first_speaker(speaker_id, time.monotonic())
+                                ambient_actor = speaker_id
+                            # A short follow-up may have no usable voiceprint. Keep
+                            # dialogue context, but never reuse identity for tools.
+                            context_actor = speaker_id if speaker_id is not None else ambient_actor
+                            if barge_detector is not None:
+                                barge_detector.reset()
+                                drain(barge_queue)
+                                monitor = BargeInMonitor(barge_detector, barge_queue)
+                                monitor.start()
+                                barge_listening = True
+                            catalog = agent.executor.catalog()
+                            rooms = [item.get("room_name") for item in catalog]
+                            voice_stage = "intent"
+                            stages.start("intent")
+                            intent_started = time.perf_counter()
+                            decision = classifier.classify(
+                                transcript, active=state == "active", rooms=rooms,
+                                context=ambient_history.context(context_actor, time.monotonic()),
+                                acoustic=acoustic,
+                                cancel=CombinedCancel(turn_stop, monitor.cancel if monitor is not None else None),
+                            )
+                            DIAGNOSTICS.emit("intent", trace_id=turn_id,
+                                             duration_ms=(time.perf_counter() - intent_started) * 1000,
+                                             outcome=decision.kind, error_code=decision.reason)
+                            if decision.kind == "ignore":
+                                if decision.reason == "intent_unavailable":
+                                    event_bus.health_summary.update({"intent_status": "unavailable", "intent_error_code": decision.reason})
+                                    log_event("intent_error", state=state, error_type="intent_unavailable")
+                                else:
+                                    event_bus.health_summary.update({"intent_status": "ready", "intent_error_code": None})
+                                    ambient_history.append("user", transcript, context_actor, time.monotonic())
+                                turn_outcome = "ignored"
+                                log_event("ignored_utterance", state=state, reason=decision.reason or "ambient_chatter")
+                                continue
+                            event_bus.health_summary.update({"intent_status": "ready", "intent_error_code": None})
+                            if state != "active":
+                                agent.reset()
+                                new_ambient_session = True
+                                state, active_origin, ambient_actor = "active", "ambient", speaker_id
+                                active_deadline = time.monotonic() + args.idle_timeout
+                                log_event("natural_trigger", state=state, reason=decision.kind)
+                        print(f"[asr {asr_seconds:.2f}s] {transcript}")
                         log_event(
                             "asr", state=state, transcript=transcript,
+                            audio_event=acoustic["audio_event"], emotion=acoustic["emotion"], clipped_ratio=acoustic["clipped_ratio"],
                             seconds=round(asr_seconds, 3),
                             **speaker_fields(
                                 verdict, speaker_name, speaker_reason,
@@ -970,18 +1359,28 @@ def main() -> int:
                             # routed to the barge queue here and a worker thread
                             # watches it: a new sentence cancels the request
                             # instead of being dropped on the floor.
-                            if barge_detector is not None:
+                            if barge_detector is not None and monitor is None:
                                 barge_detector.reset()
                                 drain(barge_queue)
                                 monitor = BargeInMonitor(barge_detector, barge_queue)
                                 monitor.start()
                                 barge_listening = True
                             if agent is not None:
+                                voice_stage = "agent"
+                                stages.start("agent")
                                 agent_started = time.perf_counter()
                                 try:
-                                    agent_reply = agent.handle(
-                                        transcript, cancel=monitor.cancel if monitor is not None else None
-                                    )
+                                    cancel = CombinedCancel(turn_stop, monitor.cancel if monitor is not None else None)
+                                    agent_reply = (agent.handle_admitted(transcript, decision, cancel=cancel)
+                                                   if decision is not None else agent.handle(transcript, cancel=cancel))
+                                    if getattr(agent_reply, "ignored", False):
+                                        turn_outcome = "ignored"
+                                        log_event("ignored_utterance", state=state, reason=agent_reply.error_code)
+                                        if new_ambient_session:
+                                            state, active_origin, ambient_actor = rest_state, None, None
+                                            agent.reset()
+                                            log_event("ambient_suppressed", state=state, reason=agent_reply.error_code)
+                                        continue
                                     DIAGNOSTICS.emit("agent", trace_id=turn_id,
                                                      outcome="cancelled" if agent_reply.cancelled else "ok" if agent_reply.ok else "error",
                                                      duration_ms=(time.perf_counter() - agent_started) * 1000,
@@ -990,6 +1389,10 @@ def main() -> int:
                                     agent_ended_conversation = agent_reply.end_conversation
                                     if agent_reply.cancelled:
                                         turn_outcome = "cancelled"
+                                        continue
+                                    if decision is not None:
+                                        ambient_history.append("user", transcript, context_actor, time.monotonic())
+                                        ambient_history.append("assistant", reply_text, context_actor, time.monotonic())
                                     print(f"[agent] {reply_text or '<cancelled>'}")
                                     log_event(
                                         "agent_reply",
@@ -1028,35 +1431,57 @@ def main() -> int:
                                                      duration_ms=(time.perf_counter() - agent_started) * 1000,
                                                      error_code="agent_exception")
 
-                            def stop_thinking_monitor() -> list[np.ndarray]:
-                                """End thinking-phase listening; return a barge, if any.
-
-                                Synthesis happens before this is called, so a user
-                                who speaks while the reply is still being generated
-                                is heard too — and the reply they interrupted is
-                                discarded instead of being played late.
-                                """
-                                nonlocal barge_listening
-                                if monitor is None:
-                                    return []
-                                monitor.stop()
-                                barge_listening = False
-                                if not monitor.interrupted:
-                                    return []
-                                # No echo guard was active here: nothing was
-                                # playing, so the pre-roll is the user's own voice.
-                                return collect_barge_head(
-                                    barge_detector, barge_queue, keep_pre_roll=True,
-                                )
-
                             def play_reply() -> None:
-                                nonlocal accept_input, barge_listening, barge_interrupted, turn_outcome
+                                nonlocal accept_input, barge_listening, barge_interrupted, turn_outcome, active_origin, voice_stage, monitor
+                                if turn_stop.is_set():
+                                    raise VoiceCancelled("speech_cancelled")
                                 reply, sr, synth_seconds = reply_text, config.SAMPLE_RATE, 0.0
+                                if getattr(tts, "supports_streaming", False):
+                                    voice_stage = "tts_synthesis"
+                                    stages.start("tts_synthesis")
+                                    stream_started = time.perf_counter()
+                                    # Keep monitoring through network gaps as well as PCM output.
+                                    # Re-arm its echo guard before playback, on the main thread.
+                                    pending = stop_thinking_monitor()
+                                    if pending:
+                                        barge_head.extend(pending)
+                                        barge_interrupted = True
+                                        turn_outcome = "cancelled"
+                                        return
+                                    if barge_detector is not None:
+                                        barge_detector.start_playback()
+                                        monitor = BargeInMonitor(barge_detector, barge_queue)
+                                        monitor.start()
+                                        barge_listening = True
+                                    def first_pcm(latency):
+                                        nonlocal voice_stage
+                                        voice_stage = "playback"
+                                        stages.start("playback")
+                                        first_audio_seconds = time.perf_counter()-stream_started
+                                        DIAGNOSTICS.emit("tts_synthesis", trace_id=turn_id, duration_ms=first_audio_seconds*1000)
+                                        DIAGNOSTICS.emit("tts_first_output", trace_id=turn_id,
+                                                         duration_ms=(time.perf_counter()-turn_started+latency)*1000)
+                                        log_event("tts_start", state=state, text=reply_text, synth_seconds=round(first_audio_seconds, 3))
+                                    token = CombinedCancel(turn_stop, monitor.cancel if monitor is not None else None)
+                                    completed = playback.play_chunks(tts.stream(reply_text, cancel=token),
+                                        output_target, should_interrupt=token.is_set, on_stream_started=first_pcm)
+                                    interrupted = stop_thinking_monitor()
+                                    if interrupted:
+                                        barge_head.extend(interrupted)
+                                        barge_interrupted = True
+                                        turn_outcome = "cancelled"
+                                    if barge_detector is not None:
+                                        barge_detector.stop_playback()
+                                    log_event("tts_end", state=state, text=reply_text, interrupted=not completed)
+                                    return
                                 if tts is not None:
                                     # Do not echo the transcript: it could contain a
                                     # wake word.
+                                    voice_stage = "tts_synthesis"
+                                    stages.start("tts_synthesis")
                                     tts_started = time.perf_counter()
-                                    reply, sr = synthesize_reply(tts, reply_text, args.speaker_id)
+                                    reply, sr = (tts.synthesize(reply_text, cancel=CombinedCancel(turn_stop, monitor.cancel if monitor is not None else None))
+                                        if isinstance(tts, voice_models.TtsEngine) and tts.provider != "kokoro" else synthesize_reply(tts, reply_text, args.speaker_id))
                                     synth_seconds = time.perf_counter() - tts_started
                                     DIAGNOSTICS.emit("tts_synthesis", trace_id=turn_id,
                                                      duration_ms=synth_seconds * 1000)
@@ -1102,6 +1527,8 @@ def main() -> int:
                                         estimated=True,
                                     )
 
+                                voice_stage = "playback"
+                                stages.start("playback")
                                 drain(barge_queue)
                                 reason = None
                                 wake = WakeBargeIn(kws) if kws is not None else None
@@ -1113,17 +1540,19 @@ def main() -> int:
                                         reason = play_with_barge(
                                             reply, sr, output_target,
                                             PlaybackBargeIn(speech=barge_detector, wake=wake),
-                                            barge_queue, record_first_output,
+                                            barge_queue, record_first_output, cancel=turn_stop,
                                         )
                                     else:
-                                        play(reply, sr, output_target, record_first_output)
+                                        play(reply, sr, output_target, record_first_output, turn_stop.is_set)
                                 finally:
+                                    if reason == "speech":
+                                        accept_input = True
                                     barge_listening = False
                                     if reason == "speech" and barge_detector is not None:
                                         # Collect before clearing the queue. These
                                         # blocks may contain the rest of the command.
                                         barge_head.extend(collect_barge_head(
-                                            barge_detector, barge_queue, keep_pre_roll=False,
+                                            barge_detector, barge_queue, keep_pre_roll=True,
                                         ))
                                     if barge_detector is not None:
                                         barge_detector.stop_playback()
@@ -1135,10 +1564,9 @@ def main() -> int:
                                         drain(barge_queue)
                                 if reason == "speech":
                                     turn_outcome = "cancelled"
-                                    # The pre-roll is the tail of the reply the
-                                    # microphone also heard. Sending it to ASR would
-                                    # be asking the assistant to answer its own words,
-                                    # so only the gated speech is kept.
+                                    # The detector keeps echo-reduced pre-roll
+                                    # (not raw reply leakage), so a quiet first
+                                    # syllable is retained with confirmed speech.
                                     barge_interrupted = True
                                     print("[barge] 你打断了播报，接着说")
                                     log_event(
@@ -1150,6 +1578,8 @@ def main() -> int:
                                     )
                                 elif reason == "wake":
                                     turn_outcome = "cancelled"
+                                    active_origin = "wake"
+                                    ambient_history.reset()
                                     # The wake phrase itself was only a gate. The
                                     # normal VAD/ASR path receives the next sentence.
                                     drain(audio_queue)
@@ -1177,10 +1607,13 @@ def main() -> int:
                             if agent_ended_conversation and not barge_interrupted:
                                 # The model judged that the user said goodbye, so
                                 # stop listening now that the farewell was spoken.
-                                print("[exit] 对话已结束，回到待唤醒")
-                                log_event("agent_end_conversation", state="standby")
-                                state = "standby"
+                                print(f"[exit] 对话已结束，回到{rest_state}")
+                                log_event("agent_end_conversation", state=rest_state)
+                                state, active_origin, ambient_actor = rest_state, None, None
+                                ambient_history.reset()
                                 kws_stream = kws.create_stream()
+                                wake_ring.clear()
+                                wake_seeded = False
                                 if agent is not None:
                                     agent.reset()
                         elif should_exit(transcript):
@@ -1190,24 +1623,42 @@ def main() -> int:
                             log_event("exit_command", state="standby", transcript=transcript)
                             state = "standby"
                             kws_stream = kws.create_stream()
+                            wake_ring.clear()
+                            wake_seeded = False
+                    except (AgentCancelled, VoiceCancelled):
+                        if recognition_session is not None:
+                            recognition_session.close()
+                            recognition_session = None
+                        log_event("agent_interrupted", state=state, reason="cancelled")
+                        turn_outcome = "cancelled"
                     except Exception as exc:
                         turn_outcome = "error"
+                        details = failure_details(voice_stage, exc)
                         DIAGNOSTICS.emit("turn_error", trace_id=turn_id, outcome="error",
-                                         error_code="voice_processing_error")
+                                         error_code=details["error_code"])
                         # A model/playback failure must not leave recognition
                         # permanently disabled. Start a fresh waiting window
                         # after the visible error feedback.
-                        print(f"[voice error] {type(exc).__name__}: {exc}", file=sys.stderr)
-                        log_event("voice_error", state=state, error_type=type(exc).__name__, message=str(exc))
+                        print(f"[voice error] {details['error_code']} ({type(exc).__name__})", file=sys.stderr)
+                        log_event("voice_error", state=state, **details)
                         if state == "active" and transcript:
                             active_deadline = deadline_after_reply(args.idle_timeout)
                     finally:
+                        stages.finish("failed" if turn_outcome == "error" else turn_outcome)
                         DIAGNOSTICS.emit("turn", trace_id=turn_id, outcome=turn_outcome,
                                          duration_ms=(time.perf_counter() - turn_started) * 1000)
                         if monitor is not None:
                             # A failure anywhere above must not leave a thread
                             # holding the microphone queue.
-                            monitor.stop()
+                            if not barge_interrupted:
+                                barge_head.extend(stop_thinking_monitor(preserve_pending=True))
+                                if barge_head and monitor.interrupted:
+                                    barge_interrupted = True
+                                    log_event("agent_interrupted", state=state, reason="speech",
+                                              captured_seconds=round(voiced_seconds(barge_head, config.SAMPLE_RATE), 2))
+                            else:
+                                monitor.stop()
+                        barge_listening = False
                         if barge_head:
                             # The interruption is the beginning of the next
                             # command. Handing it to the normal VAD path here is
@@ -1216,11 +1667,18 @@ def main() -> int:
                             # stopped the reply are never thrown away.
                             pre_roll.clear()
                             utterance = list(barge_head)
+                            utterance_token = speech_stop.token()
                             barge_head.clear()
                             in_speech = True
-                            voiced_blocks = len(utterance)
+                            vad.reset()
+                            voiced_blocks = 0
+                            trailing_silence_blocks = 0
                             for captured in utterance:
-                                vad.is_speech(captured)
+                                if vad.is_speech(captured):
+                                    voiced_blocks += 1
+                                    trailing_silence_blocks = 0
+                                else:
+                                    trailing_silence_blocks += 1
                             accept_input = True
                         else:
                             if not barge_interrupted:
@@ -1245,6 +1703,12 @@ def main() -> int:
         log_event("keyboard_interrupt", state=state)
     finally:
         print(f"audio queue overflows: {overflow_count}")
+        speech_stop.stop()
+        text_speech.stop()
+        if recognition_session is not None:
+            recognition_session.close()
+        if playback.reference_sink is processor:
+            playback.reference_sink = None
         log_event("stopped", state=state, audio_queue_overflows=overflow_count)
         if log_handle is not None:
             log_handle.close()

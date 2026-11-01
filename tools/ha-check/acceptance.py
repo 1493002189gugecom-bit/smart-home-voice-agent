@@ -11,11 +11,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import time
 import uuid
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request, urlopen, build_opener, ProxyHandler, HTTPRedirectHandler
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "apps"))
+from home_auth import home_write_headers
 
 from connection import credentials
 
@@ -57,15 +61,26 @@ def ha_request(method, path, data=None, timeout=10):
         return json.load(response)
 
 
+class _NoServiceRedirect(HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        return None
+
+
+_service_opener = build_opener(ProxyHandler({}), _NoServiceRedirect())
+
+
 def service_request(base_url, method, path, data=None, timeout=15):
+    headers = {"Content-Type": "application/json"}
+    if method.upper() == "POST":
+        headers.update(home_write_headers(base_url + path))
     request = Request(
         base_url + path,
         method=method,
         data=None if data is None else json.dumps(data).encode(),
-        headers={"Content-Type": "application/json"},
+        headers=headers,
     )
     try:
-        with urlopen(request, timeout=timeout) as response:
+        with _service_opener.open(request, timeout=timeout) as response:
             return response.status, json.load(response)
     except HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")

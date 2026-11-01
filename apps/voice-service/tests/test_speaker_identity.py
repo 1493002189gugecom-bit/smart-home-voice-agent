@@ -245,6 +245,35 @@ def test_enrolment_with_nothing_to_store_makes_no_request():
     assert instance.opener.requests == []
 
 
+def test_asking_to_accumulate_is_sent_as_a_boolean():
+    instance = client({"ok": True, "person_id": "dad", "count": 3, "persistent": True})
+
+    assert instance.enroll_person("dad", [[1.0, 0.0]], accumulate=True) is None
+    payload = json.loads(instance.opener.requests[0].data.decode("utf-8"))
+
+    assert payload["accumulate"] is True
+
+
+def test_leaving_accumulation_unspecified_omits_the_field():
+    """The default must not change for an older gallery that rejects unknown keys."""
+    instance = client({"ok": True, "person_id": "dad", "count": 1, "persistent": True})
+
+    assert instance.enroll_person("dad", [[1.0, 0.0]]) is None
+    payload = json.loads(instance.opener.requests[0].data.decode("utf-8"))
+
+    assert "accumulate" not in payload
+    assert set(payload) == {"person_id", "embeddings"}
+
+
+def test_explicitly_refusing_accumulation_is_sent_as_false():
+    instance = client({"ok": True, "person_id": "dad", "count": 1, "persistent": True})
+
+    assert instance.enroll_person("dad", [[1.0, 0.0]], accumulate=False) is None
+    payload = json.loads(instance.opener.requests[0].data.decode("utf-8"))
+
+    assert payload["accumulate"] is False
+
+
 def test_a_rejected_enrolment_reports_the_service_wording():
     instance = client({"ok": False, "message": "人物编号无效"})
 

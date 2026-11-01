@@ -39,3 +39,11 @@ def test_the_speaker_gallery_status_is_reachable():
 def test_an_unknown_service_is_refused():
     with pytest.raises(ProxyRejected):
         resolve_target("nowhere", "GET", "/health")
+
+
+def test_typed_transcripts_have_one_allowed_proxy_route():
+    assert resolve_target("voice", "POST", "/conversation/text") == VOICE + "/conversation/text"
+    with pytest.raises(ProxyRejected):
+        resolve_target("voice", "GET", "/conversation/text")
+    with pytest.raises(ProxyRejected):
+        resolve_target("voice", "POST", "/conversation/audio")

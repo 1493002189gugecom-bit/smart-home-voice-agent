@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import urllib.error
 import urllib.request
+import sys
+from pathlib import Path
 from dataclasses import dataclass
 from urllib.parse import urlsplit
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from home_auth import home_write_headers
 
 
 MAX_REQUEST_BODY = 1024 * 1024
@@ -31,8 +36,8 @@ SERVICES = {
     "voice": Service("voice", "http://127.0.0.1:8767", {
         # Voiceprint enrolment is start/watch/cancel only: the microphone belongs to
         # the voice loop, so there is deliberately no route that uploads audio.
-        "GET": ("/health", "/history", "/events", "/devices", "/identity/enroll/voice/status"),
-        "POST": ("/devices/select", "/identity/enroll/voice/start", "/identity/enroll/voice/cancel"),
+        "GET": ("/health", "/history", "/events", "/devices", "/identity/enroll/voice/status", "/intent/evaluation"),
+        "POST": ("/devices/select", "/identity/enroll/voice/start", "/identity/enroll/voice/cancel", "/conversation/text", "/conversation/stop", "/intent/evaluation/start", "/intent/evaluation/cancel"),
     }),
 }
 
@@ -46,7 +51,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-_opener = urllib.request.build_opener(_NoRedirect)
+_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
 
 
 def resolve_target(service_name: str, method: str, suffix: str) -> str:
@@ -69,5 +74,7 @@ def open_upstream(service_name: str, method: str, suffix: str, body: bytes | Non
     headers = {"Accept": "application/json, text/event-stream, image/jpeg"}
     if body is not None:
         headers["Content-Type"] = "application/json"
+    if service_name == "home" and method.upper() == "POST":
+        headers.update(home_write_headers(target))
     request = urllib.request.Request(target, data=body, headers=headers, method=method.upper())
     return _opener.open(request, timeout=timeout)

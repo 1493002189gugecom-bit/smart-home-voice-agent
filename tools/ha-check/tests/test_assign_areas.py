@@ -119,9 +119,9 @@ def test_assign_stops_then_starts_and_writes_a_backup(tmp_path):
     assert list(storage.glob("*.bak"))
 
 
-def test_the_shipped_catalog_only_references_existing_area_ids():
-    """The real catalog must not point at an area that Home Assistant lacks."""
+def test_the_shipped_catalog_covers_all_three_project_areas():
+    """The shipped living-room, bedroom and kitchen mappings stay complete."""
     catalog_data = load_catalog("apps/home-service/config/ha_entities.json")
     area_ids = {record["area_id"] for record in catalog_data.values()}
 
-    assert area_ids == {"ke_ting", "wo_shi"}
+    assert area_ids == {"ke_ting", "wo_shi", "chu_fang"}

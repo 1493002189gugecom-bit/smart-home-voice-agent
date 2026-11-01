@@ -1,0 +1,26 @@
+<!doctype html><html><head><meta charset="utf-8"></head><body style="margin:0"><div id="root"></div><script type="module">
+import * as THREE from 'three';
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import '/src/styles.css';
+import '/src/console-theme.css';
+// Development observer only: rendering and input still execute the actual
+// production controller/component. No renderer or device state is mocked.
+window.captureWalk=(renderer,camera,scene)=>{window.renderedRenderer=renderer;window.renderedCamera=camera;window.renderedScene=scene;};
+window.inputTrace=[];
+for(const type of ['pointerdown','pointerup','pointercancel','lostpointercapture','focus','blur'])document.addEventListener(type,event=>{if(event.target?.tagName==='CANVAS'||event.target?.tagName==='BUTTON')inputTrace.push({type,target:event.target.tagName,id:event.pointerId,active:document.activeElement?.tagName});},true);
+const cameraSource=await (await fetch('/src/glb-walkthrough.ts')).text();
+const marker=/camera\.rotation\.order\s*=\s*["']YXZ["'];/;
+if(!marker.test(cameraSource))throw Error('Review walkthrough observer adapter');
+const absolute=source=>source.replace(/((?:from\s+|import\s*)["'])(\/[^"']+)(["'])/g,(_,a,path,b)=>a+new URL(path,location.origin).href+b);
+const controllerUrl=URL.createObjectURL(new Blob([absolute(cameraSource.replace(marker,match=>match+'window.captureWalk(renderer,camera,scene);'))],{type:'text/javascript'}));
+let componentSource=await (await fetch('/src/ModelWalkthrough.tsx')).text();
+const controllerImport=/(["'])\/src\/glb-walkthrough\.ts(?:\?[^"']*)?\1/;
+if(!controllerImport.test(componentSource))throw Error('Review component import adapter');
+componentSource=componentSource.replace(controllerImport,JSON.stringify(controllerUrl));
+const componentUrl=URL.createObjectURL(new Blob([absolute(componentSource)],{type:'text/javascript'}));
+const {default:ModelWalkthrough}=await import(/* @vite-ignore */componentUrl);
+const root=ReactDOM.createRoot(document.querySelector('#root'));
+window.mount=()=>root.render(React.createElement(React.StrictMode,null,React.createElement(ModelWalkthrough)));
+window.unmount=()=>root.unmount();mount();
+</script></body></html>

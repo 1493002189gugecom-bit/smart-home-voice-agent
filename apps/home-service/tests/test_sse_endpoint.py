@@ -14,6 +14,7 @@ from server import HomeServiceApp, LiveStateStream, create_server  # noqa: E402
 from state import build_default_state  # noqa: E402
 from diagnostics import DiagnosticWriter, read_records  # noqa: E402
 import server as server_module  # noqa: E402
+from home_auth import home_write_headers
 
 
 def read_event(response):
@@ -42,7 +43,7 @@ def post_json(url, payload):
         url,
         method="POST",
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", **home_write_headers(url)},
     )
     with urlopen(request, timeout=2) as response:
         return json.loads(response.read().decode("utf-8"))
@@ -158,7 +159,8 @@ def test_events_endpoint_is_read_only():
     thread.start()
     url = f"http://127.0.0.1:{server.server_address[1]}"
     try:
-        request = Request(url + "/events", method="POST", data=b"{}")
+        request = Request(url + "/events", method="POST", data=b"{}",
+                          headers={"Content-Type": "application/json", **home_write_headers(url)})
         try:
             urlopen(request, timeout=2)
         except Exception as exc:

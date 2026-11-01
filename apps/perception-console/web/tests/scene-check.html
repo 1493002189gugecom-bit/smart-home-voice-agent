@@ -1,0 +1,7 @@
+<!doctype html><html><head><meta charset="utf-8"></head><body style="margin:0;background:#10172a;color:#eaf1f4"><div style="position:absolute;z-index:2;padding:16px">模拟确认快照 · 家具与设备效果验证</div><div id="stage" style="height:100vh;width:100vw"></div><script type="module">
+import {createHomeScene} from '/src/home-scene.ts';
+window.scene=createHomeScene(document.querySelector('#stage'),()=>{});
+window.sample={backend:'memory',generated_at_ms:Date.now(),devices:[...['living_room','bedroom','kitchen'].flatMap((room,i)=>[{id:room+'_light',room_id:room,type:'light',online:true,state:{on:true,brightness:[100,50,25][i]}},{id:room+'_ac',room_id:room,type:'ac',online:true,state:{on:true,mode:i===1?'fan_only':'cool',target_temp:24}}]),{id:'desk_plug',room_id:'living_room',type:'switch',online:true,state:{on:true}},{id:'indoor_temperature',room_id:'living_room',type:'sensor',online:true,state:{temperature:25.5}}]};
+window.refresh=()=>{sample.generated_at_ms=Date.now();scene.update('living_room',sample,false,{living_room:1,bedroom:0,kitchen:0});};
+refresh();window.keep=setInterval(refresh,1000);
+</script></body></html>

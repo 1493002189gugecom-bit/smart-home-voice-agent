@@ -1,0 +1,73 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>智能家居静态模型导出</title></head>
+<body style="margin:0;background:#10172a;color:#eaf1f4">
+<div style="position:absolute;padding:16px;z-index:2">GLB 静态布局导出 · 贴图内嵌 · 不连接真实设备</div>
+<div id="stage" style="width:100vw;height:100vh"></div>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
+
+window.exportGLB = async () => {
+  // Development adapter: capture the actual scene without adding an export
+  // hook, global scene, or exporter dependency to the production application.
+  const source = await (await fetch('/src/home-scene.ts')).text();
+  const hook = /\binspect\(\)\s*\{/g;
+  if ([...source.matchAll(hook)].length !== 1) throw Error('Scene controller changed; review export adapter');
+  const adapted = source.replace(hook, 'getExportRoot() { return scene; }, inspect() {')
+    .replace(/(from\s+["'])(\/[^"']+)(["'])/g, (_,start,path,end)=>start+new URL(path,location.origin).href+end);
+  const moduleUrl = URL.createObjectURL(new Blob([
+    adapted
+  ], {type:'text/javascript'}));
+  let controller;
+  try {
+    const module = await import(/* @vite-ignore */ moduleUrl);
+    controller = module.createHomeScene(document.querySelector('#stage'), () => {});
+    const devices = ['living_room','bedroom','kitchen'].flatMap(room => [
+      {id:room+'_light',room_id:room,type:'light',online:false,state:{}},
+      {id:room+'_ac',room_id:room,type:'ac',online:false,state:{}},
+    ]);
+    devices.push({id:'desk_plug',room_id:'living_room',type:'switch',online:false,state:{}},
+      {id:'indoor_temperature',room_id:'living_room',type:'sensor',online:false,state:{}});
+    // IDs/types match rooms.json; unavailable states instantiate only the
+    // physical housings. No simulated running values or readings are exported.
+    controller.update('living_room', {devices}, true, {living_room:0,bedroom:0,kitchen:0});
+    const deadline = performance.now()+10000;
+    while(controller.inspect().models.length !== 21) {
+      if(performance.now()>deadline) throw Error('Incomplete models; export cancelled');
+      await new Promise(resolve=>setTimeout(resolve,30));
+    }
+    await new Promise(requestAnimationFrame);
+    await new Promise(requestAnimationFrame);
+    const root = new THREE.Group(); root.name = 'SmartHome_KayKit_2026_10_12';
+    root.userData = {layoutVersion:'2026-10-12',kind:'static_editable_layout',units:'schematic',source:'React Three.js home scene'};
+    const scene = controller.getExportRoot();
+    scene.updateMatrixWorld(true);
+    let furnitureCount=0;
+    for(const room of scene.children.filter(o=>o.userData.roomId)) {
+      const copy=room.clone(true); copy.name='room_'+room.userData.roomId;
+      const remove=[];
+      copy.traverse(o=>{
+        if(!o.visible || o.isSprite || o.isPoints || o.isLine || o.isLight ||
+          (o.isMesh && (o.material.isShaderMaterial ||
+            (o.material.isMeshBasicMaterial && o.material.map && o.geometry.type==='PlaneGeometry')))) remove.push(o);
+        if(o.userData.asset) { furnitureCount++;o.name='furniture_'+o.userData.asset.replaceAll('/','_')+'_'+furnitureCount; }
+        if(o.userData.deviceId) o.name='device_'+o.userData.deviceId;
+      });
+      remove.forEach(o=>o.removeFromParent());
+      const roomMeshes=copy.children.filter(o=>o.isMesh);
+      ['floor','back_wall','side_wall'].forEach((name,i)=>{if(roomMeshes[i])roomMeshes[i].name=room.userData.roomId+'_'+name;});
+      root.add(copy);
+    }
+    if(root.children.length!==3 || furnitureCount!==21) throw Error('Unexpected room/furniture count');
+    root.updateMatrixWorld(true);
+    const data=await new GLTFExporter().parseAsync(root, {binary:true,onlyVisible:true});
+    const blob=new Blob([data],{type:'model/gltf-binary'});
+    const url=URL.createObjectURL(blob);
+    const link=document.createElement('a');link.href=url;link.download='smart-home-layout-2026-10-12.glb';link.click();
+    setTimeout(()=>URL.revokeObjectURL(url),1000);
+    return {bytes:data.byteLength,rooms:root.children.map(o=>o.name),furnitureInstances:furnitureCount,deviceIds:devices.map(d=>d.id)};
+  } finally {
+    controller?.dispose();URL.revokeObjectURL(moduleUrl);
+  }
+};
+</script></body></html>

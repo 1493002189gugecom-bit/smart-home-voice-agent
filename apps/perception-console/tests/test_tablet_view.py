@@ -69,6 +69,11 @@ def test_tablet_listener_is_read_only_even_with_spoofed_local_host(tmp_path, mon
         with urlopen(base + "/tablet", timeout=2) as response:
             assert response.read() == b"tablet view"
             assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"]
+        with urlopen(base + "/walkthrough?tablet=1", timeout=2) as response:
+            assert response.read() == b"tablet view"
+            assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"]
+            assert "connect-src 'self' blob:" in response.headers["Content-Security-Policy"]
+            assert "img-src 'self' data: blob:" in response.headers["Content-Security-Policy"]
         with urlopen(base + "/assets/app.js", timeout=2) as response:
             assert response.read() == b"export {};"
         with urlopen(base + "/api/home/snapshot", timeout=2) as response:

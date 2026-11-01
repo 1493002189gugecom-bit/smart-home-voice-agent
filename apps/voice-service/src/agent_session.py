@@ -14,6 +14,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from comfort_actions import ComfortActions
+
 from agent_client import (
     AgentCancelled,
     AgentClient,
@@ -129,23 +131,46 @@ def _compact(transcript: str) -> str:
     return re.sub(r"[\s，。！？,.!?、]+", "", transcript or "")
 
 
-def parse_relative_ac_change(transcript: str) -> tuple[str, float] | None:
-    """Read only one unambiguous current relative amount from the user's words."""
-    if any(marker in transcript for marker in ("不要", "别", "不是", "刚才", "之前", "原先")):
+def parse_relative_ac_change(transcript: str, target_names=()) -> tuple[str, float] | None:
+    """Correct a model's absolute guess only for a single relative request.
+
+    Compound instructions retain the model's per-tool arguments. A delta found
+    in one clause must never rewrite an absolute setpoint or power command in
+    another clause, including when the calls arrive in separate model rounds.
+    """
+    # Targets come from the authoritative catalog, never arbitrary text around
+    # a matched delta. Full matching excludes both preceding and trailing
+    # commands even when ASR supplied no punctuation at all.
+    names = {"这里", "这边", "我这", "我房间"}
+    names.update(re.sub(r"\s+", "", value) for value in target_names if isinstance(value, str) and value.strip())
+    targets = "|".join(re.escape(name) for name in sorted(names, key=len, reverse=True))
+    match = re.fullmatch(
+        rf"(?:请|帮我|麻烦你|给我)?(?:把)?(?:(?:{targets})(?:的)?)?"
+        r"(?:空调(?:的)?(?:温度)?|温度)?(?:再)?"
+        r"(调低|降低|调高|升高|低|高)(\d+(?:\.\d+)?|[一二两三四五六七八九十半])度"
+        r"(?:吧|一下)?[。.!！]*",
+        re.sub(r"\s+", "", transcript),
+    )
+    if match is None:
         return None
-    matches = list(re.finditer(
-        r"(?:再)?(调低|降低|调高|升高|低|高)\s*(\d+(?:\.\d+)?|[一二两三四五六七八九十半])\s*度",
-        transcript,
-    ))
-    if len(matches) != 1:
-        return None
-    match = matches[0]
     spoken = match.group(2)
     chinese = {"半": 0.5, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
                "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
     degrees = chinese[spoken] if spoken in chinese else float(spoken)
     direction = "cooler" if "低" in match.group(1) or "降" in match.group(1) else "warmer"
     return direction, float(degrees)
+
+
+def is_room_completion(transcript: str, room: str) -> bool:
+    """Only a whole room answer may consume a pending comfort request.
+
+    Corrections, negation and new commands go through normal semantic planning;
+    merely mentioning the classified room is not consent to the old action.
+    """
+    return re.fullmatch(
+        rf"(?:是|在|我在|我是在)?{re.escape(room)}(?:吧|呢|啊)?[。！.!]*",
+        re.sub(r"\s+", "", transcript),
+    ) is not None
 
 
 def is_direct_self_ac_change(transcript: str) -> bool:
@@ -234,6 +259,8 @@ class AgentReply:
     # True when the user interrupted this turn. The text is then empty on purpose:
     # a cancelled answer is stale the moment it exists and must never be spoken.
     cancelled: bool = False
+    # A repeated ambient complaint is intentionally silent, not a cancellation.
+    ignored: bool = False
 
     @property
     def wrote_device(self) -> bool:
@@ -270,6 +297,7 @@ class AgentSession:
         # sentence it arrived with.
         self.speaker_line: str | None = None
         self.speaker_person_id: str | None = None
+        self.comfort = ComfortActions(executor, clock=clock)
 
     # ------------------------------------------------------------------ public
     def reset(self) -> None:
@@ -277,6 +305,51 @@ class AgentSession:
         self.history = [{"role": "system", "content": self.system_prompt}]
         self.speaker_line = None
         self.speaker_person_id = None
+        self.comfort.reset()
+
+    def handle_admitted(self, transcript, decision, cancel=None) -> AgentReply:
+        """Dispatch a validated semantic verdict without giving it tool authority."""
+        if _cancelled(cancel):
+            self.speaker_line = None
+            self.speaker_person_id = None
+            return AgentReply("", False, "cancelled", cancelled=True)
+        if decision.kind == "comfort":
+            return self.handle_comfort(transcript, decision.need, decision.room, cancel)
+        if decision.kind == "follow_up" and decision.room and is_room_completion(transcript, decision.room):
+            need = self.comfort.pending_need(self.speaker_person_id)
+            if need:
+                return self.handle_comfort(transcript, need, decision.room, cancel)
+        if decision.kind == "end":
+            if _cancelled(cancel):
+                return AgentReply("", False, "cancelled", cancelled=True)
+            self.speaker_line = None
+            self.speaker_person_id = None
+            self.comfort.reset()
+            self.history.extend([{"role": "user", "content": transcript},
+                                 {"role": "assistant", "content": "好的，有需要直接说。"}])
+            self._trim()
+            return AgentReply("好的，有需要直接说。", True, end_conversation=True)
+        if decision.kind not in {"command", "follow_up"}:
+            return AgentReply("", True, ignored=True)
+        self.comfort.reset()
+        return self.handle(transcript, cancel=cancel)
+
+    def handle_comfort(self, transcript, need, room=None, cancel=None) -> AgentReply:
+        """One classified comfort need; no second cloud call chooses the action."""
+        speaker_id = self.speaker_person_id
+        self.speaker_person_id = None
+        self.speaker_line = None
+        self.history.append({"role": "user", "content": transcript})
+        try:
+            outcome = self.comfort.execute(need, room, speaker_id, cancel)
+        except AgentCancelled:
+            return self._cancelled_reply([])
+        if outcome.ignored:
+            self.history.pop()
+            return AgentReply("", True, outcome.error_code, ignored=True)
+        self.history.append({"role": "assistant", "content": outcome.text})
+        self._trim()
+        return AgentReply(outcome.text, outcome.ok, outcome.error_code, tool_results=outcome.results)
 
     def _refresh_scene_context(self) -> None:
         """Fold the live camera view and this turn's speaker line into the prompt.
@@ -330,25 +403,34 @@ class AgentSession:
         if not isinstance(transcript, str) or not transcript.strip():
             return AgentReply(text=ERROR_TEXT["empty_transcript"], ok=False, error_code="empty_transcript")
 
+        deadline = self.clock() + self.deadline_seconds
         self._refresh_scene_context()
         # Consumed: the next turn must produce its own verdict, or say nothing.
         self.speaker_line = None
         speaker_person_id = self.speaker_person_id
         self.speaker_person_id = None
         self.history.append({"role": "user", "content": transcript.strip()})
-        relative_ac_change = parse_relative_ac_change(transcript)
+        relative_ac_change = self._relative_ac_change(transcript)
+        if _cancelled(cancel):
+            return self._cancelled_reply([])
+        if self.clock() >= deadline:
+            return self._fail("agent_timeout", [])
         direct = parse_direct_self_command(transcript)
         if direct is not None:
-            result = self._run_tool(
-                ToolCall(id="local_self", name=direct.tool, arguments=direct.arguments),
-                {}, relative_ac_change, speaker_person_id,
-            )
+            try:
+                result = self._run_tool(
+                    ToolCall(id="local_self", name=direct.tool, arguments=direct.arguments),
+                    {}, relative_ac_change, speaker_person_id, cancel=cancel, deadline=deadline,
+                )
+            except AgentCancelled:
+                return self._cancelled_reply([])
+            except AgentError as exc:
+                return self._fail(exc.code, [])
             text = self._write_outcomes([result])
             self.history.append({"role": "assistant", "content": text})
             self._trim()
             return AgentReply(text=text, ok=result.ok, error_code=result.error_code,
                               tool_results=[result])
-        deadline = self.clock() + self.deadline_seconds
         collected: list[ToolResult] = []
         write_operations: dict[str, str] = {}
         ending = False
@@ -375,6 +457,11 @@ class AgentSession:
                 return self._cancelled_reply(collected)
             except AgentError as exc:
                 return self._fail(exc.code, collected)
+
+            if _cancelled(cancel):
+                return self._cancelled_reply(collected)
+            if self.clock() >= deadline:
+                return self._fail("agent_timeout", collected)
 
             if not response.wants_tools:
                 writes = [result for result in collected if result.name in WRITE_TOOLS]
@@ -408,7 +495,15 @@ class AgentSession:
             for call in response.tool_calls:
                 if _cancelled(cancel):
                     return self._cancelled_reply(collected)
-                result = self._run_tool(call, write_operations, relative_ac_change, speaker_person_id)
+                if self.clock() >= deadline:
+                    return self._fail("agent_timeout", collected)
+                try:
+                    result = self._run_tool(call, write_operations, relative_ac_change, speaker_person_id,
+                                            cancel=cancel, deadline=deadline)
+                except AgentCancelled:
+                    return self._cancelled_reply(collected)
+                except AgentError as exc:
+                    return self._fail(exc.code, collected)
                 collected.append(result)
                 self.history.append(
                     {
@@ -421,6 +516,23 @@ class AgentSession:
         return self._fail("tool_loop_exceeded", collected)
 
     # ----------------------------------------------------------------- internal
+    def _relative_ac_change(self, transcript: str) -> tuple[str, float] | None:
+        relative = parse_relative_ac_change(transcript)
+        if relative is not None or "度" not in transcript:
+            return relative
+        reader = getattr(self.executor, "catalog", None)
+        if not callable(reader):
+            return None
+        try:
+            targets = [device.get(key) for device in reader()
+                       if device.get("type") == "ac" and device.get("controllable")
+                       for key in ("id", "name", "room_id", "room_name")]
+        except Exception:
+            # Unavailable catalog means no deterministic correction; ordinary
+            # model/tool validation still owns the request and its failure.
+            return None
+        return parse_relative_ac_change(transcript, targets)
+
     def _ask(self, cancel: "threading.Event | None" = None,
              hold_delta: Callable[[str], None] | None = None) -> ChatResponse:
         """Ask the model once, buffering streamed text when watched.
@@ -461,7 +573,7 @@ class AgentSession:
 
     def _run_tool(self, call: ToolCall, write_operations: dict[str, str],
                   relative_ac_change: tuple[str, float] | None = None,
-                  speaker_person_id: str | None = None) -> ToolResult:
+                  speaker_person_id: str | None = None, cancel=None, deadline=None) -> ToolResult:
         name = call.name
         arguments = dict(call.arguments)
         if name in WRITE_TOOLS and arguments.get("target") == "self":
@@ -505,6 +617,12 @@ class AgentSession:
             if operation_id is None:
                 operation_id = new_operation_id()
                 write_operations[key] = operation_id
+        if _cancelled(cancel):
+            raise AgentCancelled()
+        # Self-target resolution can block on location data. Recheck after it,
+        # immediately before handing any new operation to the executor.
+        if deadline is not None and self.clock() >= deadline:
+            raise AgentError("agent_timeout")
         result = self.executor.execute(name, arguments, operation_id)
         if room_name and result.ok:
             # A mistaken speaker verdict is easier to correct when the spoken
@@ -574,6 +692,12 @@ class AgentSession:
         text = (self._write_outcomes(writes) + "；后续处理未完成") if writes else ERROR_TEXT.get(
             code, "请求失败。"
         )
+        if code == "agent_timeout":
+            # A partial tool batch leaves unanswered tool calls. Keep the
+            # confirmed outcome as prose, not an invalid API message sequence.
+            self._drop_abandoned_turn()
+            self.history.append({"role": "assistant", "content": text})
+            self._trim()
         return AgentReply(
             text=text, ok=False, error_code=code, tool_results=collected
         )

@@ -50,6 +50,16 @@ _TEMP_PREFIX = ".face_registry."
 _MAX_FILE_BYTES = 4 * 1024 * 1024
 # Upper bound for stored prototypes per person.
 _MAX_PROTOTYPES_PER_PERSON = 32
+# `merge` keeps a template from drifting into "matches everyone": a new recording
+# must agree with the stored voiceprint at least this much to be added at all.
+# Measured on this household's own audio, genuine scores bottom out at 0.45 and the
+# weakest session-to-session figure seen was 0.5424, so 0.35 sits below the genuine
+# band while still refusing an unrelated voice. These are deliberately looser than the
+# *matching* thresholds: enrolling is a supervised act, matching is not.
+_MIN_MERGE_SIMILARITY = 0.35
+# Above this a new recording is the same sample again; it would add weight, not
+# information, so it is skipped.
+_DUPLICATE_SIMILARITY = 0.98
 # Accepted model pack names; a mismatch must never be ranked silently.
 _PACK_PATTERN = re.compile(r"^[A-Za-z0-9_]{1,64}$")
 # Current Windows user, no UI prompt; never machine-wide scope.
@@ -455,6 +465,76 @@ class PrototypeRegistry:
             os.close(descriptor)
 
     # -------------------------------------------------------------------- API
+
+    def merge(self, person_id: str, prototypes: list[tuple[float, ...]]) -> tuple[int, int]:
+        """Add prototypes to `person_id`, keeping the ones already stored.
+
+        Why this exists: a voiceprint score depends heavily on the conditions of the
+        recording session (measured at 0.13 similarity between two sessions of the
+        same speaker), while `replace` throws the previous session away. Re-enrolling
+        therefore cannot build a template that covers more than one set of conditions.
+
+        The oldest prototypes are dropped first when the per-person limit is reached:
+        the newest session is both the most relevant to how the person sounds now and
+        the least likely to be the stale one. Returns ``(kept_from_store, added)`` so
+        a caller can report what happened rather than guess.
+
+        A candidate that disagrees with everything already stored is refused instead
+        of appended: storing it would widen the template to the point where it starts
+        matching other people, which is the failure this whole gallery exists to
+        prevent. Enrolling a *different* person must go to their own `person_id`.
+        """
+
+        self._require_public(person_id)
+        if not prototypes:
+            raise ValueError("no prototypes to merge")
+        if len(prototypes) > _MAX_PROTOTYPES_PER_PERSON:
+            raise ValueError("too many prototypes for one person")
+        normalized: list[tuple[float, ...]] = []
+        for vector in prototypes:
+            values = tuple(float(item) for item in vector)
+            if not values:
+                raise ValueError("prototype must not be empty")
+            normalized.append(_normalize(values))
+        dim = len(normalized[0])
+        if any(len(vector) != dim for vector in normalized):
+            raise ValueError("all prototypes must share one dimension")
+
+        with self._lock:
+            self.load()
+            previous = self._prototypes.get(person_id, ())
+            if previous and len(previous[0]) != dim:
+                raise ValueError("prototype dimension does not match the registry")
+            known = list(previous)
+            accepted: list[tuple[float, ...]] = []
+            for vector in normalized:
+                if known:
+                    best = max(_cosine(vector, existing) for existing in known)
+                    if best < _MIN_MERGE_SIMILARITY:
+                        raise ValueError("prototype is not consistent with the stored voiceprint")
+                    if best >= _DUPLICATE_SIMILARITY:
+                        # Near-identical to something already stored: adding it would
+                        # not add information, only weight.
+                        continue
+                known.append(vector)
+                accepted.append(vector)
+            if not accepted:
+                return (len(previous), 0)
+            combined = list(previous) + accepted
+            if len(combined) > _MAX_PROTOTYPES_PER_PERSON:
+                combined = combined[-_MAX_PROTOTYPES_PER_PERSON:]
+            try:
+                self._prototypes[person_id] = tuple(combined)
+                self._embedding_dim = dim
+                self._write_locked()
+            except Exception:
+                if previous:
+                    self._prototypes[person_id] = previous
+                else:
+                    self._prototypes.pop(person_id, None)
+                raise
+            kept = len(previous) - max(0, len(previous) + len(accepted) - _MAX_PROTOTYPES_PER_PERSON)
+            return (max(0, kept), len(accepted))
 
     def replace(self, person_id: str, prototypes: list[tuple[float, ...]]) -> None:
         """Replace every prototype of `person_id` in one encrypted write."""

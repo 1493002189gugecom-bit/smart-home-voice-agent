@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import queue
 import threading
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable
 
@@ -64,6 +65,9 @@ def create_control_server(
     port: int = 8767,
     on_select: Callable[[dict], dict] | None = None,
     on_identity: Callable[[str, dict], dict] | None = None,
+    on_text: Callable[[dict], dict] | None = None,
+    on_stop: Callable[[], dict] | None = None,
+    evaluation=None,
 ) -> ThreadingHTTPServer:
     if host not in {"127.0.0.1", "localhost"}:
         raise ValueError("voice control API must bind to loopback")
@@ -73,6 +77,9 @@ def create_control_server(
 
         def do_GET(self) -> None:  # noqa: N802 - stdlib handler contract
             path = self.path.split("?", 1)[0]
+            if path == "/intent/evaluation" and evaluation is not None:
+                self._json(200, evaluation.status())
+                return
             if path == IDENTITY_STATUS_PATH and on_identity is not None:
                 self._json(200, on_identity("status", {}))
                 return
@@ -118,7 +125,7 @@ def create_control_server(
         def do_POST(self) -> None:  # noqa: N802 - stdlib handler contract
             path = self.path.split("?", 1)[0]
             identity_action = IDENTITY_POST_ROUTES.get(path)
-            if path != "/devices/select" and identity_action is None:
+            if path not in {"/devices/select", "/conversation/text", "/conversation/stop", "/intent/evaluation/start", "/intent/evaluation/cancel"} and identity_action is None:
                 self._json(404, {"ok": False, "error_code": "not_found", "message": "unknown endpoint"})
                 return
             if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
@@ -126,13 +133,55 @@ def create_control_server(
                 return
             try:
                 length = int(self.headers.get("Content-Length", "0"))
-                if not 1 <= length <= 4096:
+                if not 1 <= length <= (10000 if path in {"/conversation/text", "/intent/evaluation/start"} else 4096):
                     raise ValueError("invalid length")
                 body = json.loads(self.rfile.read(length))
                 if not isinstance(body, dict):
                     raise ValueError("invalid body")
             except (ValueError, TypeError, json.JSONDecodeError):
                 self._json(422, {"ok": False, "error_code": "invalid_body", "message": "body must be a JSON object"})
+                return
+
+            if path == "/conversation/stop":
+                if body or on_stop is None:
+                    self._json(422 if body else 503, {"ok": False, "error_code": "stop_unavailable"})
+                else:
+                    self._json(200, on_stop())
+                return
+            if path in {"/intent/evaluation/start", "/intent/evaluation/cancel"}:
+                if evaluation is None:
+                    self._json(503, {"ok": False, "error_code": "evaluation_unavailable"})
+                    return
+                try:
+                    if path.endswith("/cancel"):
+                        if body:
+                            raise ValueError()
+                        result = evaluation.stop()
+                    else:
+                        result = evaluation.start(body)
+                    self._json(202 if result.get("ok") else 409, result)
+                except ValueError:
+                    self._json(422, {"ok": False, "error_code": "invalid_evaluation", "message": "请输入有效文本或评测数量。"})
+                return
+            if path == "/conversation/text":
+                try:
+                    if set(body) not in ({"text", "request_id"}, {"text", "request_id", "speak"}):
+                        raise ValueError()
+                    if "speak" in body and not isinstance(body["speak"], bool):
+                        raise ValueError()
+                    if not isinstance(body["text"], str) or not 1 <= len(body["text"].strip()) <= 1500:
+                        raise ValueError()
+                    if not isinstance(body["request_id"], str) or len(body["request_id"]) != 36:
+                        raise ValueError()
+                    uuid.UUID(body["request_id"])
+                except (ValueError, TypeError, AttributeError):
+                    self._json(422, {"ok": False, "error_code": "invalid_body", "message": "请输入 1–1500 字文本并提供有效的请求编号"})
+                    return
+                if on_text is None:
+                    self._json(503, {"ok": False, "error_code": "text_unavailable", "message": "文字对话未就绪，请启用 Agent 并重启语音服务"})
+                    return
+                payload = on_text(body)
+                self._json(202 if payload.get("ok") else 409 if payload.get("error_code") in {"text_busy", "request_conflict"} else 503, payload)
                 return
 
             if identity_action is not None:

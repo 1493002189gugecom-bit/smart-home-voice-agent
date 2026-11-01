@@ -5,6 +5,9 @@ import { createHomeScene, HomeSceneController } from "./home-scene";
 import DeviceControls from "./DeviceControls";
 import { sendDeviceCommand } from "./device-control-api";
 import type { DeviceCommand, DeviceControlResult } from "./device-control";
+import { snapshotFresh, SNAPSHOT_MAX_AGE } from './home-effects';
+import { isAndroidApp } from './tablet-api';
+import './walkthrough.css';
 
 const typeName: Record<string, string> = { light: "灯光", ac: "空调", sensor: "传感器", switch: "开关", speaker: "音箱" };
 
@@ -12,7 +15,7 @@ function value(value: unknown, fallback: string): string {
   return typeof value === "string" && value.trim() ? value : fallback;
 }
 
-function HouseStage({ selected, lights, occupants, onSelect }: { selected: RoomId; lights: Record<RoomId, boolean | null>; occupants: Record<RoomId, number>; onSelect: (id: RoomId) => void }) {
+function HouseStage({ selected, home, stale, occupants, onSelect, tabletMode }: { selected: RoomId; home: HomeSnapshot; stale: boolean; occupants: Record<RoomId, number>; onSelect: (id: RoomId) => void; tabletMode:boolean }) {
   const host = useRef<HTMLDivElement>(null);
   const controller = useRef<HomeSceneController | null>(null);
   const onSelectRef = useRef(onSelect);
@@ -30,19 +33,28 @@ function HouseStage({ selected, lights, occupants, onSelect }: { selected: RoomI
       setFailure(true);
     }
   }, []);
-  useEffect(() => { controller.current?.update(selected, lights, occupants); }, [selected, lights, occupants]);
+  useEffect(() => { controller.current?.update(selected, home, stale, occupants); }, [selected, home, stale, occupants]);
 
   return <div className="house-stage">
     <div ref={host} className="house-render" role="img" aria-label="三房间立体示意图；房间状态请查看下方按钮和右侧详情" />
     {failure && <div className="house-render-fallback" role="status">此设备暂不能显示 3D 画面。房间和设备状态仍可在右侧查看。</div>}
     <div className="house-stage-top"><span className="house-live-mark"><i /> HOME VIEW</span><span>房间级示意 · 非真实户型</span></div>
-    <div className="house-stage-bottom"><span>拖动旋转 · 滚轮或双指缩放 · 点击房间查看</span><button type="button" onClick={() => controller.current?.resetCamera()}>重置视角</button></div>
+    <div className="house-stage-bottom"><span>拖动旋转 · 滚轮或双指缩放 · 点击房间查看</span><div className="house-stage-actions"><a href={isAndroidApp()?'/?viewer=walkthrough&tablet=1':tabletMode?'/walkthrough?tablet=1':'/walkthrough'}>模型漫游 ↗</a><button type="button" onClick={() => controller.current?.resetCamera()}>重置视角</button></div></div>
   </div>;
 }
 
 export default function Home3D({ home, stale, tabletMode = false, controlOrigin = null, onControlBusyChange }: {
   home: HomeSnapshot; stale: boolean; tabletMode?: boolean; controlOrigin?: string | null; onControlBusyChange?: (busy: boolean) => void;
 }) {
+  const [clock, setClock] = useState(Date.now());
+  useEffect(() => {
+    setClock(Date.now());
+    const delay = typeof home.generated_at_ms==='number' ? Math.max(0,home.generated_at_ms+SNAPSHOT_MAX_AGE-Date.now()+1) : 0;
+    const timer=window.setTimeout(()=>setClock(Date.now()),delay);
+    const resume=()=>setClock(Date.now()); document.addEventListener('visibilitychange',resume);
+    return ()=>{window.clearTimeout(timer);document.removeEventListener('visibilitychange',resume);};
+  },[home.generated_at_ms]);
+  stale = !snapshotFresh(home,stale,Math.max(clock,Date.now()));
   const [selected, setSelected] = useState<RoomId>("living_room");
   const [selectedDevice, setSelectedDevice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -50,7 +62,6 @@ export default function Home3D({ home, stale, tabletMode = false, controlOrigin 
   const [operation, setOperation] = useState<{ request: DeviceCommand; name: string; result: DeviceControlResult | null } | null>(null);
   const rooms = useMemo(() => buildRoomViews(home, stale), [home, stale]);
   const current = rooms.find((room) => room.id === selected) ?? rooms[0];
-  const lights = useMemo(() => Object.fromEntries(rooms.map((room) => [room.id, room.lightOn])) as Record<RoomId, boolean | null>, [rooms]);
   const occupants = useMemo(() => Object.fromEntries(rooms.map((room) => [room.id, room.people.length])) as Record<RoomId, number>, [rooms]);
   const online = stale ? null : (home.devices ?? []).filter((device) => device.online === true).length;
   const people = knownPeopleCount(home, stale);
@@ -93,12 +104,12 @@ export default function Home3D({ home, stale, tabletMode = false, controlOrigin 
 
     <div className="home3d-main">
       <div className="home3d-visual">
-        <HouseStage selected={selected} lights={lights} occupants={occupants} onSelect={selectRoom} />
+        <HouseStage selected={selected} home={home} stale={stale} occupants={occupants} onSelect={selectRoom} tabletMode={tabletMode} />
         <div className="home3d-room-tabs" role="group" aria-label="选择房间">
           {roomOrder.map((entry) => {
             const room = rooms.find((item) => item.id === entry.id)!;
             return <button type="button" key={entry.id} disabled={busy} className={selected === entry.id ? "selected" : ""} aria-pressed={selected === entry.id} onClick={() => selectRoom(entry.id)}>
-              <span>{entry.name}</span><small>{room.temperature == null ? "温度未知" : `${room.temperature}°C`} · {stale ? "等待同步" : `${room.devices.length} 台设备`}</small>
+              <span>{entry.name}</span><small>{room.temperature == null ? "温度未知" : `${room.temperature}°C${room.temperatureSimulated?'（模拟）':''}`} · {stale ? "等待同步" : `${room.devices.length} 台设备`}</small>
             </button>;
           })}
         </div>
@@ -106,7 +117,7 @@ export default function Home3D({ home, stale, tabletMode = false, controlOrigin 
 
       <aside className={`home3d-details${focusedDevice ? " has-selection" : ""}`} aria-label={`${current.name}详情`}>
         <div className="home3d-room-heading"><span>01 / 空间详情</span><h2>{current.name}</h2><p>{roomOrder.find((entry) => entry.id === current.id)?.subtitle}</p></div>
-        <div className="home3d-temperature"><strong>{current.temperature == null ? "—" : current.temperature}<small>{current.temperature == null ? "" : "°C"}</small></strong><span>室内温度<br />{stale ? "等待实时数据" : current.temperature == null ? "尚无温度读数" : "来自家庭服务"}</span></div>
+        <div className="home3d-temperature"><strong>{current.temperature == null ? "—" : current.temperature}<small>{current.temperature == null ? "" : "°C"}</small></strong><span>室内温度<br />{stale ? "等待实时数据" : current.temperature == null ? "尚无温度读数" : current.temperatureSimulated ? "模拟温度" : home.backend==='ha' ? "传感器实测" : "传感器读数"}</span></div>
         <section className="home3d-device-picker" aria-label="选择空间设备">
         <div className="home3d-section-title"><h3>空间设备</h3><span>{current.devices.length} 台</span></div>
         <div className="home3d-device-list">

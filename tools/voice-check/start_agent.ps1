@@ -24,6 +24,8 @@ param(
     [switch]$SkipStack,
     [switch]$NoAgent,
     [switch]$Text,
+    [ValidateSet('hybrid', 'wake')]
+    [string]$ListeningMode,
     [switch]$CheckOnly
 )
 
@@ -132,7 +134,8 @@ try {
     $words = (& $python $wakeScript) -join ''
     Write-Host ''
     Write-Host "      唤醒词：$words" -ForegroundColor Yellow
-    Write-Host '      说唤醒词后即可连续对话，例如“打开客厅灯”“把卧室空调调到 24 度”。'
+    Write-Host '      默认可以直接说“卧室好热”“屋里太暗了”，也可使用唤醒词连续对话。'
+    Write-Host '      房间不明确时会追问；-ListeningMode wake 可恢复仅唤醒词模式。'
     Write-Host '      也可以整句说“我出门了”“我回来了”“我要睡觉了”。'
     Write-Host '      说“没事了”或静默 20 秒结束会话。Ctrl+C 退出。'
     Write-Host ''
@@ -151,6 +154,7 @@ try {
     $loopArguments = @($loopScript)
     if (-not $NoAgent) { $loopArguments += '--agent' }
     if ($Text) { $loopArguments += '--text' }
+    if ($ListeningMode) { $loopArguments += @('--listening-mode', $ListeningMode) }
     & $python @loopArguments
     return $LASTEXITCODE
 }

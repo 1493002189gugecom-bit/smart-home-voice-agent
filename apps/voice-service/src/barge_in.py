@@ -54,7 +54,7 @@ class BargeInSettings:
     min_rms: float = 0.02
     echo_ratio: float = 1.5
     echo_calibration_seconds: float = 0.6
-    pre_roll_blocks: int = 10
+    pre_roll_blocks: int = 20
     block_size: int = BLOCK_SIZE
 
 
@@ -84,12 +84,13 @@ class SpeechBargeDetector:
         self.settings = settings or BargeInSettings()
         self._block_size = max(1, int(self.settings.block_size))
         self._pre_roll: deque[np.ndarray] = deque(maxlen=max(1, int(self.settings.pre_roll_blocks)))
-        # Kept apart on purpose: during playback the pre-roll is the tail of the
-        # reply the microphone also heard, and only the caller knows whether
-        # sending those blocks to ASR would mean answering our own words.
+        # Keep onset context separate from confirmed speech. During playback
+        # this context is echo-reduced or leakage-filtered, never an unconditional
+        # copy of the reply heard by the microphone.
         self._lead: list[np.ndarray] = []
         self._voiced: list[np.ndarray] = []
         self._voiced_samples = 0
+        self._gap_samples = 0
         self._triggered = False
         self._echo_guard = False
         self._echo_rms: float | None = None
@@ -106,6 +107,7 @@ class SpeechBargeDetector:
         self._lead = []
         self._voiced = []
         self._voiced_samples = 0
+        self._gap_samples = 0
         self._triggered = False
         self._echo_guard = False
         self._echo_rms = None
@@ -129,6 +131,7 @@ class SpeechBargeDetector:
         self._lead = []
         self._voiced = []
         self._voiced_samples = 0
+        self._gap_samples = 0
         self._triggered = False
         self._echo_guard = True
         self._echo_rms = None
@@ -224,16 +227,16 @@ class SpeechBargeDetector:
     def take_captured(self, keep_pre_roll: bool = True) -> list[np.ndarray]:
         """Read the captured blocks and forget them, so they are used once.
 
-        `keep_pre_roll=False` drops the blocks that preceded the confirmed speech.
-        That is what the playback path needs: those blocks are the reply's own
-        leakage, and transcribing them would let the assistant act on its own
-        words.
+        `keep_pre_roll=False` is a legacy opt-out. Playback pre-roll is now
+        echo-reduced (or silenced when the echo cannot be separated safely),
+        so callers can retain a quiet first syllable without retaining raw TTS.
         """
 
         captured = self.captured if keep_pre_roll else list(self._voiced)
         self._lead = []
         self._voiced = []
         self._voiced_samples = 0
+        self._gap_samples = 0
         return captured
 
     def threshold_rms(self) -> float:
@@ -266,9 +269,26 @@ class SpeechBargeDetector:
                     # not set a bar the user can never clear.
                     self._echo_rms = statistics.fmean(self._calibration) if self._calibration else 0.0
                 if reduced is None:
+                    # No trustworthy residual during calibration: keep timing
+                    # without feeding the assistant's raw speech back to ASR.
+                    self._pre_roll.append(np.zeros_like(raw))
                     return False
             if reduced is None and loud < self.threshold_rms():
                 speech = False
+
+        # Preserve low-energy onset after echo subtraction; on an unreliable
+        # match suppress raw playback leakage rather than copying it as pre-roll.
+        retained = candidate
+        if self._echo_guard and reduced is None and loud < self.threshold_rms():
+            # A headset can have essentially no playback leakage. In that case
+            # an onset below the trigger floor but above measured echo is useful
+            # context, not the assistant's voice. Do not zero it unnecessarily.
+            above_measured_echo = (
+                self._echo_rms is not None
+                and loud > self._echo_rms * float(self.settings.echo_ratio)
+            )
+            if not above_measured_echo:
+                retained = np.zeros_like(raw)
 
         if speech and loud >= float(self.settings.min_rms):
             if not self._voiced:
@@ -276,11 +296,25 @@ class SpeechBargeDetector:
                 self._pre_roll.clear()
             self._voiced.append(candidate)
             self._voiced_samples += candidate.size
+            self._gap_samples = 0
             if self._voiced_samples >= self.settings.min_speech_seconds * self.sample_rate:
                 self._triggered = True
                 return True
         elif not self._voiced:
-            self._pre_roll.append(block)
+            self._pre_roll.append(retained)
+        else:
+            # Do not splice out a pause between the first syllable and the
+            # confirmed interruption: ASR needs the original chronology.
+            self._voiced.append(retained)
+            # Bound an unconfirmed candidate to prevent isolated noises from
+            # accumulating speech across a long silent interval.
+            self._gap_samples += retained.size
+            if self._gap_samples >= 0.5 * self.sample_rate:
+                self._pre_roll.extend(self._voiced[-self._pre_roll.maxlen:])
+                self._lead = []
+                self._voiced = []
+                self._voiced_samples = 0
+                self._gap_samples = 0
         return self._triggered
 
 

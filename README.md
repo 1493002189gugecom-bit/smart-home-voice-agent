@@ -2,7 +2,7 @@
 
 一个运行在 Windows 上的智能家庭语音 Agent：本地完成唤醒、VAD 与语音识别，使用 DeepSeek 进行受限工具调用，通过 Home Assistant 控制虚拟设备，并以语音如实反馈执行结果。
 
-> 当前状态：语音 Agent、Home Assistant 虚拟设备闭环和多设备场景已经实现并通过自动化与真实栈验收；Unity 展示层以可安装 payload 形式保存在仓库中。新增的本地人脸/姿态视觉子系统（`apps/vision-service`）**已实现、尚未验证**，需要用户自行放置模型并手动验收。通用视觉 VLM 未接入。完整语音打断与“按说话人和位置决定控制哪台设备”**已实现，尚未做真人麦克风验收**；文档状态入口见 [docs/superpowers/README.md](docs/superpowers/README.md)。
+> 当前状态：语音 Agent、Home Assistant 虚拟设备闭环和多设备场景已经实现并通过自动化与真实栈验收；展示层采用 React + TypeScript + Three.js，场景模型使用 Blender 与 glTF/GLB。新增的本地人脸/姿态视觉子系统（`apps/vision-service`）**已实现、尚未验证**，需要用户自行放置模型并手动验收。通用视觉 VLM 未接入。完整语音打断与“按说话人和位置决定控制哪台设备”**已实现，尚未做真人麦克风验收**；文档状态入口见 [docs/superpowers/README.md](docs/superpowers/README.md)。
 
 ## 已实现能力
 
@@ -16,7 +16,7 @@
 - 写操作只有观察到真实目标状态后才报告 confirmed；离线、超时和部分失败均如实反馈。
 - 场景：「我出门了」「我回来了」「我要睡觉了」。
 - 空调舒适温度和调节步长来自本地配置，模型不能自行发明温度。
-- Unity 2022.3 状态展示脚本：房间、设备、人物位置与播报高亮均由 home-service 状态驱动。
+- Three.js 家居场景与模型查看器：家具纹理、OrbitControls、漫游与 Bloom 泛光；首页设备效果由确认快照驱动，独立模型页提供静态灯光演示。
 
 ## 本地视觉（已实现，尚未验证）
 
@@ -45,7 +45,7 @@ cd E:\smart-home
 .\tools\stop-perception.ps1
 ```
 
-如只需本地模拟设备，可显式使用 `-HomeBackend memory`。Unity 不再负责摄像头、注册或语音，只读取 home-service 的人物位置与家庭状态。
+如只需本地模拟设备，可显式使用 `-HomeBackend memory`。网页读取 home-service 的人物位置与家庭状态，摄像头、注册和语音分别由对应服务负责。
 
 启动脚本退出码：`0` 表示四项服务及终端状态正常，`1` 表示终端可打开但有组件或窗口需要处理，`2` 表示终端不可用。终端“服务在线”只代表 HTTP 可响应；视觉模型、摄像头出帧和 HA 连接分别显示状态。运行中的旧服务需停止并重启后才会加载新版状态接口。
 
@@ -60,7 +60,7 @@ cd E:\smart-home
 .\.venv\Scripts\python.exe .\tools\perception-report.py report
 ```
 
-报告按冷启动、热启动和连续运行分别列出阶段 p50/p95、失败率、资源峰值与慢例 ID，并按关联 ID 计算语音/视觉到 Unity 的完整链路耗时和未闭合原因；未采集的阶段显示“未测量”。Unity 运行时的 SSE 接收和场景回调耗时保存在 `HomeServiceClient.DiagnosticsPath`，可把其所在目录传给报告命令的 `--unity-directory` 参数。
+报告按冷启动、热启动和连续运行分别列出阶段 p50/p95、失败率、资源峰值与慢例 ID，并按关联 ID 统计已采集阶段的耗时和未闭合原因；未采集的阶段显示“未测量”。
 
 ```powershell
 cd E:\smart-home
@@ -80,7 +80,7 @@ cd E:\smart-home
 - [Voice Service](apps/voice-service/README.md)
 - [Home Service](apps/home-service/README.md)
 - [Vision Service](apps/vision-service/README.md)
-- [Unity House payload](apps/unity-house-payload/README.md)
+- [场景素材与 Blender 工程](apps/perception-console/scene-assets/README.md)
 
 ## 架构
 
@@ -92,7 +92,7 @@ cd E:\smart-home
                  ↓ 仅提交观察，不能控制设备
              home-service（127.0.0.1:8765，权威状态）
                  → Home Assistant / MQTT 虚拟设备
-                 → SSE → Unity 状态展示
+                 → React / Three.js 网页与 Android 平板
                  ↑ Edge TTS
 ```
 
@@ -111,7 +111,7 @@ home-service 是权威执行层。模型只能调用本地暴露的闭集工具�
 
 - 原始音频默认不持久保存；云端只接收转写文本和完成任务所需的上下文。
 - 摄像头原始画面只存在于内存与当前预览，不默认写盘；人脸特征用 DPAPI 绑定当前 Windows 用户加密，存放在 Git 忽略的 `runtime/vision`。
-- 启动顺序：先 home-service（创建 `runtime/vision/home-service.token`），再 vision-service（只读取该令牌），最后 Unity。
+- 启动顺序：先 home-service（创建 `runtime/vision/home-service.token`），再 vision-service（只读取该令牌），最后启动感知终端网页。
 - API 密钥、HA token、视觉令牌、模型权重、音频、日志、数据库和运行时配置不进入 Git。
 - Home Assistant 与 home-service 仅绑定本机 loopback；MQTT 不发布到宿主机端口。
 - 本仓库尚未指定项目代码许可证；对外分发前还需完成第三方模型、唤醒词资源和素材的许可证核验。

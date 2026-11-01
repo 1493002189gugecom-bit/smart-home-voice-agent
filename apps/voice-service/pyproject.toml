@@ -5,9 +5,10 @@ description = "CPU-only local voice validation service for the smart-home Agent"
 requires-python = ">=3.11,<3.12"
 dependencies = [
   "click==8.5.0",
-  "edge-tts==7.2.8",
+  "edge-tts==7.3.1",
   "numpy==2.4.6",
   "pypinyin==0.55.0",
+  "pywebrtc-audio==0.2.0",
   "sentencepiece==0.2.2",
   "sherpa-onnx==1.13.8",
   "sounddevice==0.5.6",

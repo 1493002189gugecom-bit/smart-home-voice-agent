@@ -7,6 +7,9 @@ import { speakerChip, speakerChipText } from "./speaker-chip";
 import { previewIsStale, previewSourceKey } from "./preview";
 import { VoiceEnrollment, VoiceEnrollmentResponse, enrollmentGuidance, enrollmentInstruction, enrollmentProgress, enrollmentSummary, startErrorGuidance } from "./voice-enrollment";
 import Home3D from "./Home3D";
+import VoiceComposer from "./VoiceComposer";
+import { voiceErrorText } from "./voice-error-text";
+import VoiceWorkbench from "./VoiceWorkbench";
 
 type Tab = "home" | "overview" | "vision" | "voice" | "identity" | "services";
 type Camera = { kind: string; device_id?: string; label: string; width?: number; height?: number; fps?: number };
@@ -133,7 +136,7 @@ function useConsoleData() {
 
   useEffect(() => {
     const stream = new EventSource("/api/voice/events");
-    const types = ["voice_state", "transcript", "agent_reply", "tool_result", "playback_state", "service_error"];
+    const types = ["voice_state", "transcript", "agent_reply", "agent_delta", "tool_result", "playback_state", "service_error", "text_turn", "voice_stage", "asr_partial"];
     const receive = (message: Event) => {
       try {
         const event = JSON.parse((message as MessageEvent).data) as VoiceEvent;
@@ -173,7 +176,7 @@ function App() {
         {tab === "home" && <Home3D home={data.home} stale={data.homeStale} onControlBusyChange={setHomeControlBusy} />}
         {tab === "overview" && <Overview {...data} />}
         {tab === "vision" && <Vision {...data} />}
-        {tab === "voice" && <Voice events={data.voiceEvents} devices={data.audioDevices} stale={data.status?.services?.voice?.state !== "up"} refreshDevices={data.refreshAudioDevices} />}
+        {tab === "voice" && <Voice events={data.voiceEvents} devices={data.audioDevices} stale={data.status?.services?.voice?.state !== "up"} capabilities={data.status?.services?.voice?.data} refreshDevices={data.refreshAudioDevices} />}
         {tab === "identity" && <Identity registration={data.registration} vision={data.vision} cameras={data.cameras} people={data.people} registeredIds={data.registeredIds} speakerIds={data.speakerIds} voiceEnrollment={data.voiceEnrollment} refresh={data.refresh} refreshCameras={data.refreshCameras} refreshPeople={data.refreshPeople} visionAvailable={canOpenRegistration(data.status?.services?.vision?.state)} />}
         {tab === "services" && <Services status={data.status} />}
       </main>
@@ -239,7 +242,9 @@ function Vision({ vision, cameras, status, refresh, refreshCameras }: ReturnType
 }
 
 function voiceEventText(item: VoiceEvent): string {
+  if (item.type === "service_error") return voiceErrorText(item.payload);
   if (item.type === "playback_state") {
+    if (item.payload.source_event === "tts_synthesizing") return "正在合成语音…";
     if (item.payload.source_event === "tts_start") return display(item.payload.barge_in_hint, "正在播报…");
     if (item.payload.source_event === "tts_interrupted") return "已打断播报，等待新命令";
     if (item.payload.source_event === "agent_interrupted") return "已打断处理，这条回复不再播报";
@@ -248,11 +253,11 @@ function voiceEventText(item: VoiceEvent): string {
   return display(item.payload.message ?? item.payload.phrase ?? item.payload.source_event);
 }
 
-function Voice({ events, devices, stale, refreshDevices }: { events: VoiceEvent[]; devices: AudioDevices; stale: boolean; refreshDevices: () => Promise<AudioDevices> }) {
+function Voice({ events, devices, stale, refreshDevices, capabilities }: { events: VoiceEvent[]; devices: AudioDevices; stale: boolean; capabilities?: Record<string, unknown>; refreshDevices: () => Promise<AudioDevices> }) {
   // Oldest first, newest last: a conversation reads downward. The container
   // scrolls itself, so the newest line is the one you are already looking at.
   const visible = useMemo(() => {
-    const keep = events.filter((item) => ["transcript", "agent_reply", "agent_delta", "tool_result", "playback_state", "service_error"].includes(item.type));
+    const keep = events.filter((item) => ["transcript", "agent_reply", "agent_delta", "tool_result", "playback_state", "service_error", "text_turn"].includes(item.type));
     // Each delta repeats the sentence so far, so only the newest one is ever
     // displayed; letting the rest through would push the conversation out of the
     // 80-item window during a single long reply.
@@ -266,7 +271,7 @@ function Voice({ events, devices, stale, refreshDevices }: { events: VoiceEvent[
     // Only follow when the reader is already at the bottom: scrolling up to read
     // history must not be yanked away by the next token.
     if (node && pinnedRef.current) node.scrollTop = node.scrollHeight;
-  }, [visible.length]);
+  }, [visible]);
   const latestState = [...events].reverse().find((item) => item.type === "voice_state");
   const [inputChoice, setInputChoice] = useState("auto");
   const [outputChoice, setOutputChoice] = useState("auto");
@@ -306,28 +311,31 @@ function Voice({ events, devices, stale, refreshDevices }: { events: VoiceEvent[
   };
   const selectedInput = devices.inputs.find((item) => item.is_selected);
   const selectedOutput = devices.outputs.find((item) => item.is_selected);
-  const transcript = visible.filter((item) => item.type === "transcript" || item.type === "agent_reply");
+  const transcript = visible.filter((item) => item.type === "transcript" || item.type === "agent_reply"
+    || (item.type === "text_turn" && ["ignored", "failed"].includes(String(item.payload.turn_status))));
   // A delta carries the whole sentence so far, so only the newest one matters,
   // and it stops being shown the moment the finished reply lands.
   const lastDeltaAt = visible.reduce((at, item, index) => (item.type === "agent_delta" ? index : at), -1);
   const lastReplyAt = visible.reduce((at, item, index) => (item.type === "agent_reply" ? index : at), -1);
   const streaming = lastDeltaAt > lastReplyAt ? String(visible[lastDeltaAt].payload.text ?? "") : "";
   const tail = visible[visible.length - 1];
-  const awaiting = !streaming && Boolean(tail) && (tail.type === "transcript" || tail.type === "tool_result");
+  const awaiting = !streaming && Boolean(tail) && (tail.type === "transcript" || tail.type === "tool_result"
+    || (tail.type === "text_turn" && tail.payload.turn_status === "processing"));
   const choices = (list: AudioDevice[]) => list.filter((item) => item.usable && item.hostapi !== "Windows WDM-KS").map((item) => <option key={item.index} value={item.index}>{item.name} · {item.hostapi}{item.is_system_default ? " · 系统默认" : ""}</option>);
   return <div className="stack">{stale && <div className="notice">语音服务尚未就绪；下方对话是本次页面保留的历史记录。设备列表可用于排查和重选。</div>}
-    <section className="card audio-panel"><CardTitle title="语音与设备" subtitle={display(latestState?.payload.state, "等待语音服务")} />
+    <details className="card audio-panel"><summary><CardTitle title="语音与设备" subtitle={selectedInput?.name ?? display(latestState?.payload.state, "等待语音服务")} /><span>设备设置</span></summary>
       {(devices.warnings?.input || devices.warnings?.output) && <div className="notice" role="status">此前手动选择的{[devices.warnings?.input && "麦克风", devices.warnings?.output && "扬声器"].filter(Boolean).join("和")}当前不可用，语音服务已尝试自动回退。请核对下方实际使用的设备。</div>}
       <div className="audio-current"><div><span>正在使用 · 麦克风</span><strong>{selectedInput?.name ?? "尚未连接"}</strong><small>{selectedInput?.hostapi ?? "请检查语音服务"}</small></div><div><span>正在使用 · 扬声器</span><strong>{selectedOutput?.name ?? "尚未连接"}</strong><small>{selectedOutput?.hostapi ?? "请检查语音服务"}</small></div></div>
       <div className="audio-choice"><label htmlFor="input-device">麦克风<select id="input-device" value={inputChoice} onChange={(event) => { setInputChoice(event.target.value); setDirty(true); }} disabled={applying || !devices.inputs.length}><option value="auto">跟随系统当前设备（自动跳过虚拟设备）</option>{choices(devices.inputs)}</select></label><label htmlFor="output-device">扬声器<select id="output-device" value={outputChoice} onChange={(event) => { setOutputChoice(event.target.value); setDirty(true); }} disabled={applying || !devices.outputs.length}><option value="auto">跟随系统当前设备（自动跳过虚拟设备）</option>{choices(devices.outputs)}</select></label><button disabled={applying || !devices.inputs.length || !devices.outputs.length} onClick={() => void apply()}>{applying ? "应用中…" : "应用设备选择"}</button></div>
       {feedback && <p className="audio-feedback" role="status">{feedback}</p>}
-    </section>
-    <div className="two-col voice-layout"><section className="card dialogue-card"><CardTitle title="实时对话" subtitle="播报时说唤醒词，等播报停止后说新命令" /><div className="timeline" ref={timelineRef} onScroll={(event) => { const node = event.currentTarget; pinnedRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < 32; }}>
-      {!transcript.length && !streaming && !awaiting && <p className="timeline-empty">还没有对话。说“小屋小屋”唤醒后开始说话。</p>}
+    </details>
+    <VoiceWorkbench events={events} stale={stale} capabilities={capabilities} />
+    <div className="two-col voice-layout"><section className="card dialogue-card"><CardTitle title="实时对话" subtitle="直接表达家居需求，也可使用唤醒词或在下方打字" /><div className="timeline" ref={timelineRef} onScroll={(event) => { const node = event.currentTarget; pinnedRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < 32; }}>
+      {!transcript.length && !streaming && !awaiting && <p className="timeline-empty">在下方输入一句话，例如“好热啊”。你和小屋的对话会显示在这里。</p>}
       {transcript.map((item) => <Dialogue key={item.id} event={item} who={item.type === "transcript" ? "你" : "小屋"} />)}
       {awaiting && <div className="dialogue assistant"><strong>小屋</strong><p className="thinking">正在思考…</p></div>}
       {streaming && <div className="dialogue assistant streaming"><strong>小屋</strong><p>{streaming}<span className="caret" /></p><small>正在回答…</small></div>}
-    </div></section><section className="card"><CardTitle title="执行与播报" subtitle="只根据服务确认结果显示成功" /><div className="event-list">{visible.filter((item) => !["transcript", "agent_reply", "agent_delta"].includes(item.type)).map((item) => <div className={`event ${item.type}`} key={item.id}><strong>{item.type === "tool_result" ? `设备操作 · ${item.payload.ok === true ? "成功" : "未成功"}` : item.type === "playback_state" ? "语音播报" : "状态"}</strong><span>{voiceEventText(item)}</span><small>{new Date(item.timestamp).toLocaleTimeString()}</small></div>)}</div></section></div></div>;
+    </div><VoiceComposer events={events} stale={stale} /></section><section className="card"><CardTitle title="执行与播报" subtitle="只根据服务确认结果显示成功" /><div className="event-list">{visible.filter((item) => !["transcript", "agent_reply", "agent_delta", "text_turn"].includes(item.type)).map((item) => <div className={`event ${item.type}`} key={item.id}><strong>{item.type === "tool_result" ? `设备操作 · ${item.payload.ok === true ? "成功" : "未成功"}` : item.type === "playback_state" ? "语音播报" : item.type === "service_error" ? "错误" : "状态"}</strong><span>{voiceEventText(item)}</span><small>{new Date(item.timestamp).toLocaleTimeString()}</small></div>)}</div></section></div></div>;
 }
 
 function Identity({ registration, vision, cameras, people, registeredIds, speakerIds, voiceEnrollment, refresh, refreshCameras, refreshPeople, visionAvailable }: {
@@ -486,6 +494,6 @@ function VoiceprintPanel({ personId, personName, enrolled, response, busy, onSta
   </>;
 }
 
-function Dialogue({ event, who }: { event?: VoiceEvent; who: string }) { const text = event?.payload.transcript ?? event?.payload.text ?? event?.payload.message; const chip = who === "你" && event ? speakerChip(event.payload) : null; return <div className={`dialogue ${who === "你" ? "user" : "assistant"}`}><strong>{who}{chip && <span className={`speaker-chip ${chip.tone}`} title={chip.title}>{speakerChipText(chip)}</span>}</strong><p>{display(text, "暂无内容")}</p>{event && <small>{new Date(event.timestamp).toLocaleTimeString()}</small>}</div>; }
+function Dialogue({ event, who }: { event?: VoiceEvent; who: string }) { const text = event?.payload.transcript ?? event?.payload.text ?? event?.payload.message; const chip = who === "你" && event?.payload.input_mode !== "text" && event ? speakerChip(event.payload) : null; return <div className={`dialogue ${who === "你" ? "user" : "assistant"}`}><strong>{who}{event?.payload.input_mode === "text" && who === "你" && <span className="speaker-chip">文字输入</span>}{chip && <span className={`speaker-chip ${chip.tone}`} title={chip.title}>{speakerChipText(chip)}</span>}</strong><p>{display(text, "暂无内容")}</p>{event && <small>{new Date(event.timestamp).toLocaleTimeString()}</small>}</div>; }
 
 export default App;

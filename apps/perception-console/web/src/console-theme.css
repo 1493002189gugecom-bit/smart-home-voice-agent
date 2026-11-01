@@ -54,6 +54,8 @@
 .console-main .speaker-chip.known { background: #2f574a; color: #c6f1dc; }
 .console-main .speaker-chip.unsure { background: #3a4358; color: #d5dbea; }
 .console-main .dialogue.streaming { border-color: #76b99d; background: #1b343b; }
+.console-main .voice-composer textarea { background: #1b2940; border-color: #45506b; color: #eef1f9; }
+.console-main .voice-composer textarea::placeholder { color: #a4b1c8; }
 .console-main .preview { background: linear-gradient(135deg, #1c2942, #0c1425); }
 .console-main .live-badge { background: rgb(28 48 66 / 92%); color: #a8e6d3; }
 .console-main :is(.registration-success, .preview-finished) { border-color: #76b99d; background: #233f3d; color: #d6f3e2; }

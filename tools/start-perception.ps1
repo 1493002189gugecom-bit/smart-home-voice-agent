@@ -14,6 +14,8 @@ param(
     [ValidateRange(5, 300)]
     [int]$TimeoutSeconds = 60,
     [switch]$NoWindow,
+    [ValidateSet('hybrid', 'wake')]
+    [string]$ListeningMode,
     [switch]$TabletView
 )
 
@@ -24,6 +26,7 @@ $manifestPath = Join-Path $runtimeRoot 'processes.json'
 $frontendIndex = Join-Path $repoRoot 'apps\perception-console\web\dist\index.html'
 $python = Join-Path $repoRoot '.venv\Scripts\python.exe'
 $visionPython = Join-Path $repoRoot '.venv-vision\Scripts\python.exe'
+. (Join-Path $PSScriptRoot 'perception-health.ps1')
 
 if (-not (Test-Path $frontendIndex -PathType Leaf)) {
     Write-Warning 'Perception UI is not built. Run npm install and npm run build in apps\perception-console\web first.'
@@ -49,6 +52,16 @@ New-Item -ItemType Directory -Path $runtimeRoot -Force | Out-Null
 
 $env:PYTHONIOENCODING = 'utf-8'
 
+# Resolve the same default (including local config) as loop.py, then pass it
+# explicitly so newly started and reused processes are checked identically.
+if (-not $ListeningMode) {
+    $voiceSrc = Join-Path $repoRoot 'apps\voice-service\src'
+    $ListeningMode = (& $python -c 'import sys; sys.path.insert(0, sys.argv[1]); import config; print(config.listening_mode())' $voiceSrc | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $ListeningMode -notin @('wake', 'hybrid')) {
+        throw 'Could not resolve the configured voice listening mode.'
+    }
+}
+
 function Test-ListeningPort {
     param([int]$Port)
     return $null -ne (Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue | Select-Object -First 1)
@@ -71,6 +84,27 @@ function Test-Endpoint {
         return $response.StatusCode -ge 200 -and $response.StatusCode -lt 300
     }
     catch { return $false }
+}
+
+function Test-ServiceReady {
+    param($Service)
+    if (-not (Test-ServicePortOwner -Service $Service)) { return $false }
+    try {
+        $health = Invoke-RestMethod -Uri $Service.Health -TimeoutSec 2
+        # The voice HTTP server can answer before semantic admission finishes
+        # initialization. Wait for its actual mode before checking configuration.
+        if ($Service.Name -eq 'voice' -and -not $health.listening_mode) { return $false }
+        return $true
+    }
+    catch { return $false }
+}
+
+function Assert-RunningConfiguration {
+    param($Service)
+    if ($Service.Name -in @('home', 'voice')) {
+        $health = Invoke-RestMethod -Uri $Service.Health -TimeoutSec 2
+        Assert-ServiceConfiguration -Name $Service.Name -Health $health -HomeBackend $HomeBackend -ListeningMode $ListeningMode
+    }
 }
 
 function Test-TabletView {
@@ -143,6 +177,10 @@ if ($TabletView) {
     ($services | Where-Object { $_.Name -eq 'console' }).Arguments = @('--tablet-port', '8771')
 }
 
+if ($ListeningMode) {
+    ($services | Where-Object { $_.Name -eq 'voice' }).Arguments += @('--listening-mode', $ListeningMode)
+}
+
 $owned = @(Get-OwnedProcesses)
 $failures = @()
 foreach ($service in $services) {
@@ -155,12 +193,13 @@ foreach ($service in $services) {
     if ($null -ne $ownedEntry -and (Test-OwnedEntry -Entry $ownedEntry)) {
         Write-Host "[$($service.Name)] waiting for existing launcher process (PID $($ownedEntry.pid))"
         $serviceDeadline = (Get-Date).AddSeconds($TimeoutSeconds)
-        while (-not ((Test-Endpoint -Uri $service.Health) -and (Test-ServicePortOwner -Service $service))) {
+        while (-not (Test-ServiceReady -Service $service)) {
             if ((Get-Date) -gt $serviceDeadline) {
                 throw "[$($service.Name)] did not become ready within $TimeoutSeconds seconds on port $($service.Port)."
             }
             Start-Sleep -Milliseconds 500
         }
+        Assert-RunningConfiguration -Service $service
         Write-Host "[$($service.Name)] ready on 127.0.0.1:$($service.Port)"
         if ($service.Name -eq 'console' -and $TabletView -and -not (Test-TabletView)) {
             throw 'Existing console has no tablet view. Run tools\stop-perception.ps1, then start again with -TabletView.'
@@ -168,6 +207,7 @@ foreach ($service in $services) {
         continue
     }
     if ((Test-Endpoint -Uri $service.Health) -and (Test-ServicePortOwner -Service $service)) {
+        Assert-RunningConfiguration -Service $service
         if ($service.Name -eq 'console' -and $TabletView -and -not (Test-TabletView)) {
             throw 'Existing console has no tablet view. Run tools\stop-perception.ps1, then start again with -TabletView.'
         }
@@ -222,7 +262,7 @@ foreach ($service in $services) {
     Save-Manifest -Processes $owned
     Write-Host "[$($service.Name)] started (PID $($process.Id)); waiting for health"
     $serviceDeadline = (Get-Date).AddSeconds($TimeoutSeconds)
-    while (-not ((Test-Endpoint -Uri $service.Health) -and (Test-ServicePortOwner -Service $service))) {
+    while (-not (Test-ServiceReady -Service $service)) {
         if ($process.HasExited) {
             throw "[$($service.Name)] process exited before health became ready."
         }
@@ -231,6 +271,7 @@ foreach ($service in $services) {
         }
         Start-Sleep -Milliseconds 500
     }
+    Assert-RunningConfiguration -Service $service
     Write-Host "[$($service.Name)] ready on 127.0.0.1:$($service.Port)"
     if ($service.Name -eq 'console' -and $TabletView -and -not (Test-TabletView)) {
         throw '[console] tablet view did not become ready on 127.0.0.1:8771.'

@@ -7,7 +7,9 @@ is data, not instructions.
 from __future__ import annotations
 
 import json
+import math
 import os
+import hmac
 import sys
 import threading
 import time
@@ -18,6 +20,7 @@ from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from diagnostics import DiagnosticWriter
+from home_auth import ensure_write_token
 
 from ha_gateway import HAGateway
 from ha_event_subscriber import HAEventSubscriber
@@ -42,6 +45,15 @@ from visual_state import (
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
+MAX_REQUEST_BODY = 1024 * 1024
+BODY_TIMEOUT_SECONDS = 5.0
+
+
+def _finite_json_number(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("non-finite JSON number")
+    return number
 
 # Only these two variables may be read from the local env file. The file is
 # git-ignored and is never logged or echoed back.
@@ -592,24 +604,79 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args) -> None:  # quiet console
         return
 
-    def _read_body(self) -> dict[str, Any]:
-        length = int(self.headers.get("Content-Length") or 0)
-        if length <= 0:
-            return {}
-        raw = self.rfile.read(length)
-        if not raw:
-            return {}
-        return json.loads(raw.decode("utf-8"))
+    def _reject(self, status: int, code: str) -> None:
+        # A rejected body is intentionally not drained. Close the connection so
+        # its unread bytes cannot be parsed as a second pipelined request.
+        self.close_connection = True
+        self._respond(status, {"ok": False, "error_code": code})
+
+    def _trusted_request(self) -> bool:
+        hosts = self.headers.get_all("Host", [])
+        port = self.server.server_address[1]
+        allowed = {f"127.0.0.1:{port}", f"localhost:{port}"}
+        if port == 80:
+            allowed.update({"127.0.0.1", "localhost"})
+        if len(hosts) != 1 or hosts[0].lower() not in allowed:
+            self._reject(403, "invalid_host")
+            return False
+        origins = self.headers.get_all("Origin", [])
+        if origins and (len(origins) != 1 or origins[0] != "http://" + hosts[0].lower()):
+            self._reject(403, "invalid_origin")
+            return False
+        if not self.path.startswith("/") or self.path.startswith("//"):
+            self._reject(400, "invalid_request_target")
+            return False
+        return True
+
+    def _read_body(self) -> dict[str, Any] | None:
+        if self.headers.get_all("Transfer-Encoding"):
+            self._reject(400, "unsupported_transfer_encoding")
+            return None
+        lengths = self.headers.get_all("Content-Length", [])
+        if len(lengths) != 1 or not lengths[0].isascii() or not lengths[0].isdigit() or len(lengths[0]) > 10:
+            self._reject(400, "invalid_content_length")
+            return None
+        length = int(lengths[0])
+        if length > MAX_REQUEST_BODY:
+            self._reject(413, "body_too_large")
+            return None
+        types = self.headers.get_all("Content-Type", [])
+        if len(types) != 1 or types[0].split(";", 1)[0].strip().lower() != "application/json":
+            self._reject(415, "json_required")
+            return None
+        previous_timeout = self.connection.gettimeout()
+        try:
+            self.connection.settimeout(BODY_TIMEOUT_SECONDS)
+            raw = self.rfile.read(length)
+            if len(raw) != length:
+                raise ValueError("incomplete body")
+            body = json.loads(raw.decode("utf-8"), parse_constant=_finite_json_number,
+                              parse_float=_finite_json_number)
+            if not isinstance(body, dict):
+                raise ValueError("object required")
+        except TimeoutError:
+            self._reject(408, "body_timeout")
+            return None
+        except (ValueError, UnicodeError, RecursionError):
+            self._reject(400, "invalid_json_object")
+            return None
+        finally:
+            self.connection.settimeout(previous_timeout)
+        return body
 
     def _respond(self, status: int, payload: dict[str, Any]) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(data)
 
     def do_GET(self) -> None:  # noqa: N802
+        if not self._trusted_request():
+            return
         parsed = urlparse(self.path)
         if parsed.path == "/events":
             self._respond_sse()
@@ -627,15 +694,24 @@ class _Handler(BaseHTTPRequestHandler):
             "GET", parsed.path, parse_qs(parsed.query), {}, self._vision_headers()
         )
         if parsed.path == "/health" and status == 200:
-            payload = {**payload, **self.server.stream.health_summary()}
+            payload = {**payload, **self.server.stream.health_summary(),
+                       "backend": self.server.stream.backend, "write_auth": "required"}
         self._respond(status, payload)
 
     def do_POST(self) -> None:  # noqa: N802
+        if not self._trusted_request():
+            return
         parsed = urlparse(self.path)
-        try:
-            body = self._read_body()
-        except json.JSONDecodeError as exc:
-            self._respond(400, {"ok": False, "error": f"invalid json: {exc}"})
+        # Vision ingress keeps its separate, existing credential and application
+        # checks. A vision token never grants permission to control devices.
+        if not parsed.path.startswith("/vision/"):
+            tokens = self.headers.get_all("X-Home-Token", [])
+            supplied = tokens[0] if len(tokens) == 1 else ""
+            if not hmac.compare_digest(supplied.encode("utf-8"), self.server.write_token.encode("ascii")):
+                self._reject(401, "home_write_unauthorized")
+                return
+        body = self._read_body()
+        if body is None:
             return
         started = time.perf_counter()
         status, payload = self.app.handle(
@@ -696,6 +772,9 @@ def create_server(
     *,
     heartbeat_seconds: float = 15.0,
 ) -> _SSEThreadingHTTPServer:
+    if host not in {"127.0.0.1", "localhost"}:
+        raise ValueError("home-service must bind to loopback")
+    write_token = ensure_write_token()
     stream = LiveStateStream(app)
     handler = type("BoundHandler", (_Handler,), {"app": app})
     server = _SSEThreadingHTTPServer(
@@ -704,6 +783,7 @@ def create_server(
         stream,
         heartbeat_seconds,
     )
+    server.write_token = write_token
     stream.start()
     return server
 

@@ -26,3 +26,8 @@ test("room view shows only confirmed room locations and fresh device state", () 
   assert.deepEqual(stale.people, []);
   assert.equal(knownPeopleCount(snapshot, true), 0);
 });
+test('measured temperature wins over simulation and simulation is labelled', () => {
+  const s={rooms:[{id:'living_room',simulated_temp:28}],devices:[{id:'indoor_temperature',room_id:'living_room',type:'sensor',online:true,state:{temperature:23}}]};
+  assert.equal(buildRoomViews(s,false)[0].temperature,23);
+  assert.equal(buildRoomViews({rooms:s.rooms},false)[0].temperatureSimulated,true);
+});

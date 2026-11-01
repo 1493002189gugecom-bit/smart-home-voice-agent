@@ -1,5 +1,9 @@
 # docs/superpowers 索引与状态登记
 
+2026-11-01 展示栈确认：仅保留 Blender + Three.js。两份旧 Unity 工程、Unity payload 和校验工具已清理，独有 Blender 文件已转存，源资料已备份到项目外；见 [Unity 退役记录](reports/2026-11-01-unity-retirement.md)。历史 Unity 计划和报告保留为过程资料，不代表当前架构。
+
+2026-11-01 三维作业进度：[纹理与泛光](reports/2026-11-01-texture-bloom.md)。家具原有贴图已核实，Three.js 模型页新增可开关 Bloom；网页验证通过，真实平板性能待验收。
+
 **这里是一切的入口。** 计划（plans）、设计（specs）、笔记（notes）、报告（reports）混在
 这个目录里，文件名日期不等于内容日期，所以状态只以本文件为准。
 
@@ -30,9 +34,21 @@
 
 ## 2. 进行中的专项计划
 
+2026-10-28 业务正确性修复：补充房间与改口分流、复合空调指令参数隔离、启动时后端/监听模式校验、home-service HTTP 请求校验与本机写入鉴权已实现。离线回归和本地模拟设备联调见[业务修复报告](reports/2026-10-28-business-fixes.md)；真人语音及真实设备验收仍待完成。
+
+2026-10-20 glTF / OrbitControls 作业：已通过 Blender MCP 实际导出 `.gltf + .bin + 贴图`，新增 `/walkthrough?model=gltf`，明确左键旋转、滚轮缩放、右键平移；正式 glTF 鼠标检查 8 项、原 GLB 回归 7 项、前端 37 项及网页构建通过。用户自行录视频，操作步骤见[作业报告](reports/2026-10-20-gltf-orbitcontrols.md)。本次更新网页，Android APK 保持 10-12 的 2.2 版本。
+
+2026-10-12 课程要求验收：按“用 Three.js 装载、显示场景模型，能实现一定的漫游”核查，当前实现符合。正式 8770 页面浏览器 7 项、移动与碰撞测试 7 项及 TypeScript 检查通过；房间内行走、拖动环视、停止和重置已验证，跨房间通过按钮切换。见[课程验收报告](reports/2026-10-12-threejs-course-acceptance.md)。
+
+2026-10-12 GLB 漫游：导出模型已接入 Three.js，新增 `/walkthrough` 与“我的家”里的模型漫游入口；支持全屋旋转/缩放、第一人称键盘与触控行走、拖动环视、房间切换、地板限位和家具碰撞。前端 37 项、终端/HA 90 项、漫游浏览器 21 项及最终三个入口检查通过，Android 2.2 已构建。见[漫游报告](reports/2026-10-12-glb-walkthrough.md)。
+
+2026-10-12 场景布局修正：床头靠墙、厨房操作面朝内，修正柜体、餐椅、台灯、挂画及冰箱/灶台重叠，并从开敞侧展示。实际模型空间检查 11 项和前端 30 项通过，设备/缩放/资源及四比例模拟回归通过；最新网页和 Android 2.1.1 已构建。观感与真机验收待用户完成，见[布局修正报告](reports/2026-10-12-furniture-layout-fix.md)。
+
 2026-10-01 提交前回归：终端/HA 90 项、语音 97 项、视觉 22 项、前端 23 项通过，网页构建及 193 个素材校验通过；真实设备与平板体验仍按各专项计划验收。见[GitHub 提交前检查](reports/2026-10-01-github-upload-check.md)。
 
-2026-10-01 素材进度：用户已选择 KayKit 为主选，53 个家具模型和原始贴图已保存，53/53 在浏览器中加载/渲染成功并生成单品预览；18 个优先候选，Kenney 140 个模型保留为储备。当前 Three.js 只有灯开关效果，亮度、空调气流及家具替换仍待实施。见[素材与设备效果计划](plans/2026-10-01-threejs-assets-and-device-effects.md)和[家具库](../../apps/perception-console/scene-assets/README.md)。
+2026-10-01 家具与状态效果：19 种模型 / 21 实例、四类设备效果、稳定 ID、过期保护和近景标签渐显已完成，最新前端 30 项、后端 90 项及浏览器模拟检查通过；最终网页与 Android 2.1 已重建，资源/APK 一致性检查通过。真实设备、目标平板安装和性能、观感待用户验收。见[实施报告](reports/2026-10-01-kaykit-device-effects.md)与[专项计划](plans/2026-10-01-threejs-assets-and-device-effects.md)。
+
+2026-10-02 声纹实测：30 条真实录音对线上 DPAPI 声纹库打分 **0.5735 / 0.7114 / 0.7685**（min/中位/max），阈值 0.55 只剩 0.025 余量，已改为 0.45；FRR 0/30。同时修掉语音时长估算的真实 bug（30 条里 26 条被误判为静音）并补 `speaker_verdict` 诊断（首次记录分数与音频时长）。**FAR 因只有一人注册而无法测量**。见[实测报告](notes/2026-10-02-speaker-far-report.md)。
 
 终端视觉进度：2026-10-01 已将电脑六个页面统一为“我的家”的深色风格，导航、标题、边距在桌面与平板宽度下保持一致。见[统一主题报告](reports/2026-10-01-console-unified-theme.md)。
 
@@ -40,7 +56,7 @@
 
 | 文件 | 计划时间 | 状态 | 下一步 / 卡在哪 |
 | --- | --- | --- | --- |
-| [`plans/2026-10-01-threejs-assets-and-device-effects.md`](plans/2026-10-01-threejs-assets-and-device-effects.md) | 2026-10-01 | KayKit 主选 53/53 浏览器加载渲染通过；**场景接入与设备效果扩展待实施** | 18 个 KayKit 优先候选；补齐厨房、空调/插座/传感器，按确认快照实现灯亮度和气流；平板性能与设备效果待真人验收 |
+| [`plans/2026-10-01-threejs-assets-and-device-effects.md`](plans/2026-10-01-threejs-assets-and-device-effects.md) | 2026-10-01 | **家具、设备效果、近景标签与 GLB 漫游已实现；10-12 最新网页和 Android 2.2 已构建** | 布局与漫游自动检查通过；真实设备、目标平板安装/性能和观感待真人验收，见[漫游报告](reports/2026-10-12-glb-walkthrough.md)与[布局报告](reports/2026-10-12-furniture-layout-fix.md) |
 | [`plans/2026-09-26-voice-intent-and-audio-integrity.md`](plans/2026-09-26-voice-intent-and-audio-integrity.md) | 2026-09-26 | **计划与现场诊断已完成；本次修复未实施** | P0-3：舒适请求、一次性待续与本轮可信证据；P0-4：录音完整性和插话；模拟验证及真人验收待做 |
 | [`plans/2026-09-30-android-tablet-app.md`](plans/2026-09-30-android-tablet-app.md) | 2026-09-30 | Android 工程与第二版 APK 已完成并 USB 更新；**真实设备与平板体验待验收** | 见[第二版报告](reports/2026-10-01-manual-device-control-v2.md)；核对胶囊开关、亮度滑轨、自动同步与响应速度 |
 | [`plans/2026-09-25-speaker-bound-operation-target.md`](plans/2026-09-25-speaker-bound-operation-target.md) | 2026-09-25 | Phase A 已实现；**Phase B 未实现**（全仓无 `resolve_self_target`） | 做 Phase B 前先补 A9 的 FAR/FRR 实测（当前阈值是估的） |
@@ -104,7 +120,7 @@
 | 对象 | 说明 |
 | --- | --- |
 | [`notes/2026-09-12-model-review.md`](notes/2026-09-12-model-review.md) | 待办 4：KWS 与 Silero 缺随附许可证文本，对外分发前必须解决 |
-| A9 FAR/FRR 实测 | 声纹阈值（0.55/0.08）目前是估的，没有实测报告；误判说话人会导致控制错房间 |
+| A9 FAR/FRR 实测 | **部分完成（2026-10-02）**：FRR 已用 30 条真实录音实测（0/30），阈值由 0.55 改为 0.45；劣化条件下新阈值仍 0%。**FAR 仍未测量**（需第二个人的录音）。另已实现跨会话**累积注册**（`registry.merge` + `accumulate`，默认开启），模拟余量 +0.132，真实收益待第二个会话。见[声纹实测报告](notes/2026-10-02-speaker-far-report.md) |
 | `apps/voice-service/README.md` 里提到的 `docs/superpowers/notes/2026-09-25-speaker-far-report.md` | **该文件不存在**，那条命令只是用法示例，不要当成已有证据 |
 
 ## 8. 内容曾被埋没的地方（已处理）
@@ -116,6 +132,8 @@
 | 八设备 SSE 的两项 important 缺陷 | `.superpowers/sdd/2026-09-17-ha-eight-device-sync/final-review.md`（**git 忽略目录**，tracked 文档无索引） | 已摘录进 [`plans/2026-09-17-ha-eight-device-sync.md`](plans/2026-09-17-ha-eight-device-sync.md) 开头 |
 | Kokoro→edge-tts、DirectSound“写入成功但没声音” | 阶段 A 报告中段 | 见该报告 §2.1/§4b |
 | 通用教训（dotnet 编译 Unity C#、`asdict()` 不序列化 `@property`、**PowerShell 5.1 重写中文文件会毁内容**） | `findings.md:78-91`、`progress.md:61` | 新结论请写进 `progress.md` 并在此登记 |
+| **两个服务不能在同一次 pytest 进程里导入** | 2026-10-02 声纹实测时踩到 | `apps/voice-service/src/config.py` 与 `apps/vision-service/src/config.py` 同名；pytest 会在**任何 fixture 运行前**导入全部测试模块，所以"测完再清理 sys.path"来不及。必须拆成两次运行：`python -m pytest apps/voice-service/tests apps/home-service/tests apps/tests apps/perception-console/tests`（不带 vision 路径）与 `PYTHONPATH=apps/vision-service/src python -m pytest apps/vision-service/tests` |
+| 跨服务测试要沿接缝拆开 | 同上 | 需要两个服务的测试（例如"语音发的注册请求，gallery 能不能收"）分别放在各自的 tests/ 下，各用各的 app 作为被测对象；同进程混导会让失败信息指向完全无关的 `ImportError` |
 
 ## 9. Unity / Blender 的落点（避免再次猜错）
 

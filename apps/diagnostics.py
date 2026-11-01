@@ -49,6 +49,7 @@ class DiagnosticWriter:
              observation_id: str | None = None, operation_id: str | None = None,
              trigger_ids: Iterable[str] | None = None,
              duration_ms: float | None = None, error_code: str | None = None,
+             confidence: float | None = None, audio_seconds: float | None = None,
              resource_rss_mb: float | None = None, resource_cpu_percent: float | None = None,
              run_kind: str | None = None, **_discarded: Any) -> None:
         if self.directory == DEFAULT_DIRECTORY and "PYTEST_CURRENT_TEST" in os.environ:
@@ -76,9 +77,15 @@ class DiagnosticWriter:
         if accepted_code is not None:
             record["error_code"] = accepted_code
         for key, value in (("duration_ms", duration_ms), ("resource_rss_mb", resource_rss_mb),
-                           ("resource_cpu_percent", resource_cpu_percent)):
+                           ("resource_cpu_percent", resource_cpu_percent),
+                           ("audio_seconds", audio_seconds)):
             if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0:
                 record[key] = round(float(value), 3)
+        # A similarity is bounded by definition; accepting 1.5 would produce a record
+        # that looks like a measurement while being nonsense.
+        if isinstance(confidence, (int, float)) and not isinstance(confidence, bool) \
+                and math.isfinite(confidence) and 0.0 <= confidence <= 1.0:
+            record["confidence"] = round(float(confidence), 4)
         line = (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
         if len(line) > self.max_bytes:
             return

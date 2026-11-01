@@ -9,7 +9,7 @@ export type StatusResponse = {
 export type VoiceEvent = {
   id: number;
   timestamp: string;
-  type: "voice_state" | "transcript" | "agent_reply" | "agent_delta" | "tool_result" | "playback_state" | "service_error";
+  type: "voice_state" | "transcript" | "agent_reply" | "agent_delta" | "tool_result" | "playback_state" | "service_error" | "text_turn" | "voice_stage" | "asr_partial";
   payload: Record<string, unknown>;
 };
 

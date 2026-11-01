@@ -6,6 +6,7 @@ import sys
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 import loop
 
@@ -50,6 +51,70 @@ def test_microphone_startup_reports_enabled_barge_in(tmp_path, monkeypatch):
     ready = next(json.loads(line) for line in log_file.read_text(encoding="utf-8").splitlines()
                  if '"event": "ready"' in line)
     assert ready["barge_in"] is True
+
+
+@pytest.mark.parametrize("pause_blocks", [0, 1, 15])
+def test_merged_wake_preserves_queued_command_and_does_not_play_tone(tmp_path, monkeypatch, pause_blocks):
+    class Kws:
+        def __init__(self):
+            self.count = 0
+            self.pending = False
+        def create_stream(self):
+            return self
+        def accept_waveform(self, rate, block):
+            self.count += 1
+            self.pending = True
+        def is_ready(self, stream):
+            return self.pending
+        def decode_stream(self, stream):
+            self.pending = False
+        def get_result(self, stream):
+            return "你好小屋" if self.count == 40 else ""
+        def reset_stream(self, stream):
+            pass
+
+    class Vad:
+        def reset(self):
+            pass
+        def is_speech(self, block):
+            return bool(block[0] > 0)
+
+    class InputStream:
+        def __init__(self, **kwargs):
+            self.callback = kwargs["callback"]
+        def start(self):
+            # All command blocks are already queued when wake is detected.
+            for value in [1.0] * 40 + [2.0] * 10 + [0.0] * pause_blocks + [2.0] * 10 + [0.0] * 30:
+                self.callback(np.full((512, 1), value, dtype=np.float32), 512, None, None)
+        def close(self):
+            pass
+
+    captured = []
+    spoken = []
+    log_file = tmp_path / "merged.jsonl"
+    monkeypatch.setattr(sys, "argv", ["loop.py", "--no-control-api", "--no-tts",
+                                      "--run-seconds", "0.3", "--log-file", str(log_file)])
+    monkeypatch.setattr(loop.device_preferences, "load", lambda: {"input": None, "output": None})
+    monkeypatch.setattr(loop.config, "speaker_model_path", lambda: None)
+    monkeypatch.setattr(loop.config, "wake_command_merge_enabled", lambda: True)
+    monkeypatch.setattr(loop.config, "command_end_silence_seconds", lambda: 0.7)
+    monkeypatch.setattr(loop.config, "wake_words", lambda _: ["你好小屋"])
+    monkeypatch.setattr(loop, "initialize_voice", lambda args, prefs: (
+        SimpleNamespace(index=1, name="mic"), None, Kws(), Vad(), object(), None, None))
+    monkeypatch.setattr(loop.sd, "InputStream", InputStream)
+    monkeypatch.setattr(loop, "play", lambda *a, **k: spoken.append(a))
+    def transcribe(asr, samples, rate):
+        captured.append(samples.copy())
+        return "你好小屋，开灯"
+    monkeypatch.setattr(loop.voice_models, "transcribe", transcribe)
+    monkeypatch.setattr(loop, "resolve_speaker", lambda *a: (None, None, "not_evaluated"))
+    assert loop.main() == 0
+    assert len(captured) == 1
+    assert np.count_nonzero(captured[0] == 1.0) == 40 * 512
+    assert np.count_nonzero(captured[0] == 2.0) == 20 * 512
+    assert not spoken
+    events = [json.loads(line) for line in log_file.read_text(encoding="utf-8").splitlines()]
+    assert any(e.get("event") == "asr" and e.get("transcript") == "开灯" for e in events)
 
 
 def test_active_silent_session_times_out_at_deadline():
@@ -279,6 +344,13 @@ def test_exit_phrases_reset_session():
     assert loop.should_exit("退出连续对话")
     assert loop.should_exit("请结束对话")
     assert not loop.should_exit("继续聊天")
+
+
+def test_wake_phrase_is_removed_only_from_transcript_prefix():
+    assert loop.strip_wake_phrases("你好小屋，把客厅灯打开", ["你好小屋"]) == "把客厅灯打开"
+    assert loop.strip_wake_phrases("小屋小屋 开灯", ["你好小屋", "小屋小屋"]) == "开灯"
+    assert loop.strip_wake_phrases("请说你好小屋再开灯", ["你好小屋"]) == "请说你好小屋再开灯"
+    assert loop.strip_wake_phrases("你好小屋", ["你好小屋"]) == ""
 
 
 def test_short_filler_is_not_sent_to_the_agent():

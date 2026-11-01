@@ -47,6 +47,22 @@ def _require_exact_keys(body: dict[str, Any], allowed: set[str]) -> None:
         raise VisionRequestError(422, "invalid_body", f"字段必须恰好是 {sorted(allowed)}")
 
 
+def _require_keys(body: dict[str, Any], *, required: set[str], optional: set[str]) -> None:
+    """Required fields must be present and nothing outside the allowed set may appear.
+
+    Needed wherever a field is optional: an exact-set check would force every older
+    client to send it, which turns adding a parameter into a breaking change.
+    """
+
+    missing = required - set(body)
+    unknown = set(body) - required - optional
+    if missing or unknown:
+        raise VisionRequestError(
+            422, "invalid_body",
+            f"缺少字段 {sorted(missing)}，未知字段 {sorted(unknown)}",
+        )
+
+
 def select_source(runtime: VisionRuntime, body: Any) -> CameraSource:
     payload = _require_object(body)
     kind = payload.get("kind")
@@ -107,6 +123,24 @@ def _speaker_vectors(raw: Any) -> list[tuple[float, ...]]:
             values.append(float(value))
         vectors.append(tuple(values))
     return vectors
+
+
+def speaker_enrolment(body: Any) -> tuple[str, list[tuple[float, ...]], bool]:
+    """Enrolment payload plus whether to keep what is already stored.
+
+    ``accumulate`` defaults to False so an existing caller keeps the documented
+    whole-person replacement; only a client that asks for accumulation gets it.
+    """
+
+    payload = _require_object(body)
+    _require_keys(payload, required={"person_id", "embeddings"}, optional={"accumulate"})
+    person_id = payload.get("person_id")
+    if not valid_person_id(person_id):
+        raise VisionRequestError(422, "invalid_person", "人物编号无效")
+    accumulate = payload.get("accumulate", False)
+    if not isinstance(accumulate, bool):
+        raise VisionRequestError(422, "invalid_accumulate", "accumulate 必须是布尔值")
+    return (person_id, _speaker_vectors(payload.get("embeddings")), accumulate)
 
 
 def speaker_embeddings(body: Any) -> list[tuple[float, ...]]:
@@ -286,21 +320,30 @@ class VisionApp:
 
         if method == "POST" and path == "/identity/speaker/enroll":
             payload = _require_object(body)
-            vectors = speaker_embeddings(payload)
-            person_id = str(payload["person_id"])
+            person_id, vectors, accumulate = speaker_enrolment(payload)
+            registry = self.runtime.speaker_registry
+            added: int | None = None
             try:
-                self.runtime.speaker_registry.replace(person_id, vectors)
+                if accumulate:
+                    _kept, added = registry.merge(person_id, vectors)
+                else:
+                    registry.replace(person_id, vectors)
             except ValueError as exc:
                 raise VisionRequestError(422, "invalid_embedding", str(exc)) from exc
             except RegistryError as exc:
                 raise VisionRequestError(503, "speaker_registry_unavailable", str(exc)) from exc
-            registry = self.runtime.speaker_registry
-            return 200, {
+            response: dict[str, Any] = {
                 "ok": True,
                 "person_id": person_id,
+                "accumulate": accumulate,
                 "count": registry.counts().get(person_id, 0),
                 "persistent": registry.persistent,
             }
+            # Reported separately so a caller can tell "all five were already known"
+            # from "five more were stored": with accumulate they mean different things.
+            if added is not None:
+                response["added"] = added
+            return 200, response
 
         if method == "POST" and path == "/identity/speaker/match":
             candidate = self.runtime.speaker_registry.rank(speaker_query(body))[0]

@@ -22,11 +22,20 @@ def create_asr() -> sherpa_onnx.OfflineRecognizer:
     )
 
 
+class Transcript(str):
+    def __new__(cls, text, *, emotion="", event="", lang=""):
+        value = super().__new__(cls, text)
+        value.emotion, value.event, value.lang = emotion, event, lang
+        return value
+
+
 def transcribe(recognizer: sherpa_onnx.OfflineRecognizer, samples: np.ndarray, sample_rate: int = 16000) -> str:
     stream = recognizer.create_stream()
     stream.accept_waveform(sample_rate, np.asarray(samples, dtype=np.float32))
     recognizer.decode_stream(stream)
-    return stream.result.text.strip()
+    result = stream.result
+    return Transcript(result.text.strip(), emotion=getattr(result, "emotion", ""),
+                      event=getattr(result, "event", ""), lang=getattr(result, "lang", ""))
 
 
 class TtsEngine:
@@ -41,7 +50,7 @@ class TtsEngine:
     def __init__(self, provider: str | None = None, voice: str | None = None) -> None:
         self.provider = (provider or config.tts_provider()).lower()
         self.voice = voice or config.edge_voice()
-        if self.provider not in ("edge", "kokoro"):
+        if self.provider not in ("edge", "kokoro", "cosyvoice"):
             raise ValueError(f"unknown TTS provider: {self.provider!r}")
         self._kokoro: sherpa_onnx.OfflineTts | None = None
 
@@ -78,7 +87,7 @@ class TtsEngine:
         sf.write(str(wav), samples, rate, subtype="PCM_16")
         return samples, rate
 
-    def synthesize(self, text: str) -> tuple[np.ndarray, int]:
+    def synthesize(self, text: str, *, cancel=None) -> tuple[np.ndarray, int]:
         """Return (mono float32 samples, sample rate) or raise on failure."""
         if self.provider == "kokoro":
             tts = self._kokoro_engine()
@@ -86,7 +95,44 @@ class TtsEngine:
             if audio is None or len(audio.samples) == 0:
                 raise RuntimeError("Kokoro generated no samples")
             return np.asarray(audio.samples, dtype=np.float32), int(audio.sample_rate)
-        return _edge_synthesize(text, self.voice)
+        if self.provider == "cosyvoice":
+            chunks = [samples for samples, _ in self.stream(text, cancel=cancel)]
+            if not chunks:
+                raise RuntimeError("speech_empty_audio")
+            return np.concatenate(chunks), 24000
+        if cancel is None:
+            return _edge_synthesize(text, self.voice)
+        return _edge_synthesize(text, self.voice, cancel=cancel)
+
+    @property
+    def supports_streaming(self):
+        return self.provider in {"cosyvoice", "edge"}
+
+    def stream(self, text, *, cancel=None):
+        from cloud_speech import stream_tts
+        if self.provider == "cosyvoice":
+            yield from stream_tts(text, cancel=cancel)
+        elif self.provider == "edge":
+            import re
+            import time
+            remaining = config.speech_timeout()
+            # Edge returns compressed audio per sentence. Keep each sentence
+            # bounded so long replies can start playing before the rest is ready.
+            parts = re.findall(r"[^。！？!?；;\n]{1,100}[。！？!?；;\n]?|[。！？!?；;\n]", text)
+            for part in parts:
+                if part.strip():
+                    if remaining <= 0:
+                        raise TimeoutError("speech_timeout")
+                    started = time.monotonic()
+                    try:
+                        chunk = _edge_synthesize(part, self.voice, cancel=cancel, timeout=remaining)
+                    except Exception as error:
+                        error.voice_stage = "tts_synthesis"
+                        raise
+                    remaining -= time.monotonic()-started
+                    yield chunk
+        else:
+            yield self.synthesize(text, cancel=cancel)
 
 
 def _decode_edge_audio(payload: bytes) -> tuple[np.ndarray, int]:
@@ -104,16 +150,15 @@ def _decode_edge_audio(payload: bytes) -> tuple[np.ndarray, int]:
     return samples, int(rate)
 
 
-def _edge_synthesize(text: str, voice: str) -> tuple[np.ndarray, int]:
+def _edge_synthesize(text: str, voice: str, *, cancel=None, timeout=None) -> tuple[np.ndarray, int]:
     """Fetch MP3 audio from the Edge read-aloud service and decode it.
 
     Retries transient failures, and also retries a suspiciously slow response
     because the service occasionally stalls instead of erroring.
     """
     import asyncio
-    import time
-
     import edge_tts
+    from voice_runtime import bounded, run, VoiceCancelled
 
     async def fetch() -> bytes:
         communicate = edge_tts.Communicate(
@@ -129,45 +174,21 @@ def _edge_synthesize(text: str, voice: str) -> tuple[np.ndarray, int]:
                 payload.extend(chunk["data"])
         return bytes(payload)
 
-    def run_fetch() -> bytes:
-        """Run the fetch without swallowing genuine network errors.
-
-        A bare ``except RuntimeError`` around ``asyncio.run`` would also catch
-        errors raised *inside* the coroutine and trigger the nested-loop
-        fallback, doubling the number of requests per retry. The event-loop
-        situation is therefore detected explicitly.
-        """
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            # Normal synchronous context.
-            return asyncio.run(fetch())
-        # Already inside an event loop: use a private one instead.
-        loop = asyncio.new_event_loop()
-        try:
-            return loop.run_until_complete(fetch())
-        finally:
-            loop.close()
-
-    last_error: Exception | None = None
-    for attempt in range(1, config.EDGE_MAX_ATTEMPTS + 1):
-        try:
-            started = time.perf_counter()
-            payload = run_fetch()
-            elapsed = time.perf_counter() - started
-            if not payload:
-                raise RuntimeError(f"edge-tts returned no audio for voice {voice!r}")
-            if elapsed > config.EDGE_SLOW_SECONDS and attempt < config.EDGE_MAX_ATTEMPTS:
-                raise RuntimeError(f"edge-tts responded slowly ({elapsed:.1f}s); retrying")
-            return _decode_edge_audio(payload)
-        except Exception as exc:  # noqa: BLE001
-            last_error = exc
-            if attempt < config.EDGE_MAX_ATTEMPTS:
-                time.sleep(config.EDGE_RETRY_DELAY_SECONDS)
-
-    raise RuntimeError(
-        f"edge-tts failed after {config.EDGE_MAX_ATTEMPTS} attempts: {last_error}"
-    ) from last_error
+    async def attempts():
+        for attempt in range(1, config.EDGE_MAX_ATTEMPTS + 1):
+            try:
+                payload = await fetch()
+                if not payload:
+                    raise RuntimeError("speech_empty_audio")
+                return payload
+            except VoiceCancelled:
+                raise
+            except Exception as error:
+                status = getattr(error, "status", None)
+                if status in {400, 401, 403, 404} or attempt == config.EDGE_MAX_ATTEMPTS:
+                    raise RuntimeError(f"edge-tts failed after {attempt} attempts") from error
+                await asyncio.sleep(config.EDGE_RETRY_DELAY_SECONDS)
+    return _decode_edge_audio(run(bounded(attempts(), timeout if timeout is not None else config.speech_timeout(), cancel)))
 
 
 def create_tts(provider: str | None = None, voice: str | None = None) -> TtsEngine:

@@ -241,6 +241,65 @@ def test_take_queued_blocks_empties_the_queue_in_order():
     assert blocks.empty()
 
 
+def test_playback_retains_echo_reduced_quiet_onset(monkeypatch):
+    detector = SpeechBargeDetector(ScriptedVad([False] * 3 + [True] * 10), SAMPLE_RATE, settings())
+    detector.start_playback()
+    # Known echo subtraction exposes a quiet first syllable below trigger floor.
+    monkeypatch.setattr(detector, "_without_playback_echo", lambda block: block - np.float32(0.1))
+    for _ in range(3):
+        assert not detector.feed(loud(0.105))
+    for _ in range(10):
+        detector.feed(loud(0.5))
+    captured = detector.take_captured(keep_pre_roll=True)
+    assert len(captured) == 13
+    assert np.allclose(captured[0], 0.005)
+    assert np.allclose(captured[-1], 0.4)
+
+
+def test_playback_pre_roll_never_copies_unmatched_reply_leakage():
+    detector = SpeechBargeDetector(ScriptedVad([True] * 40), SAMPLE_RATE, settings())
+    detector.start_playback()
+    for _ in range(19):
+        detector.feed(loud(0.1))
+    for _ in range(3):
+        detector.feed(loud(0.12))  # below calibrated echo threshold
+    for _ in range(10):
+        detector.feed(loud(0.4))
+    captured = detector.take_captured(keep_pre_roll=True)
+    assert len(captured) == 13
+    assert all(np.all(block == 0) for block in captured[:3])
+
+
+def test_headset_quiet_onset_above_measured_echo_is_not_zeroed():
+    detector = SpeechBargeDetector(ScriptedVad([False] * 22 + [True] * 10), SAMPLE_RATE, settings())
+    detector.start_playback()
+    for _ in range(19):
+        detector.feed(quiet(0.001))
+    for _ in range(3):
+        detector.feed(quiet(0.005))
+    for _ in range(10):
+        detector.feed(loud(0.4))
+    captured = detector.take_captured(keep_pre_roll=True)
+    assert len(captured) == 13
+    assert np.allclose(captured[0], 0.005)
+
+
+def test_confirmation_keeps_internal_pause_in_order():
+    detector = SpeechBargeDetector(ScriptedVad([True] * 4 + [False] * 3 + [True] * 6), SAMPLE_RATE, settings())
+    values = [0.3] * 4 + [0.001] * 3 + [0.4] * 6
+    for value in values:
+        detector.feed(loud(value))
+    assert detector.triggered
+    assert np.allclose([block[0] for block in detector.take_captured()], values)
+
+
+def test_unconfirmed_noise_does_not_accumulate_across_long_silence():
+    detector = SpeechBargeDetector(ScriptedVad([True] * 3 + [False] * 20 + [True] * 7), SAMPLE_RATE, settings())
+    for value in [0.3] * 3 + [0.001] * 20 + [0.4] * 7:
+        detector.feed(loud(value))
+    assert not detector.triggered
+
+
 def test_voiced_seconds_reports_how_much_of_the_command_was_captured():
     assert voiced_seconds([loud(), loud()], SAMPLE_RATE) == 2 * BLOCK / SAMPLE_RATE
 

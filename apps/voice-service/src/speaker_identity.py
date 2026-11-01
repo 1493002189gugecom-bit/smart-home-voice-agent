@@ -134,19 +134,23 @@ class SpeakerIdentityClient:
             return SpeakerVerdict("uncertain", confidence=score, margin=gap, reason="ambiguous")
         return SpeakerVerdict("confirmed", person_id=person_id, confidence=score, margin=gap)
 
-    def enroll_person(self, person_id: str, embeddings) -> str | None:
-        """Store one person's voiceprints, replacing anything already there.
+    def enroll_person(self, person_id: str, embeddings, *, accumulate: bool | None = None) -> str | None:
+        """Store one person's voiceprints. Returns None on success, else a reason.
 
-        Returns ``None`` on success or a human-readable failure reason. Enrolment is
-        the only write this client performs, and it is always a whole-person
-        replacement so a half-finished enrolment can never leave a mixed gallery.
+        ``accumulate`` asks the gallery to keep whatever is already stored instead of
+        replacing it, which is the only way to build a template spanning more than one
+        recording session. ``None`` sends the field not at all, which the gallery reads
+        as the original whole-person replacement, so an older gallery keeps working.
         """
 
         vectors = [_vector(item) for item in embeddings]
         if not vectors:
             return "没有可保存的声纹样本"
+        payload: dict[str, Any] = {"person_id": str(person_id), "embeddings": vectors}
+        if accumulate is not None:
+            payload["accumulate"] = bool(accumulate)
         try:
-            body = self._post("/identity/speaker/enroll", {"person_id": str(person_id), "embeddings": vectors})
+            body = self._post("/identity/speaker/enroll", payload)
         except HTTPError as exc:
             try:
                 failure = json.loads(exc.read().decode("utf-8", errors="replace"))

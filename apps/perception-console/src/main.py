@@ -127,7 +127,7 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 self._manual_device_control()
                 return
-            allowed = parsed.path in {"/tablet", "/health", "/api/home/snapshot", "/tablet/app-debug.apk"} or parsed.path.startswith("/assets/")
+            allowed = parsed.path in {"/tablet", "/walkthrough", "/health", "/api/home/snapshot", "/tablet/app-debug.apk"} or parsed.path.startswith("/assets/")
             if method != "GET" or not allowed or self.headers.get("Sec-Fetch-Site") not in {None, "none", "same-origin"}:
                 self.close_connection = True
                 self._json(403, {"ok": False, "error_code": "tablet_read_only", "message": "此入口仅允许家庭快照和所选设备控制"})
@@ -364,7 +364,7 @@ class Handler(BaseHTTPRequestHandler):
         if getattr(self.server, "tablet_mode", False):
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Referrer-Policy", "no-referrer")
-            self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'")
+            self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self' blob:; object-src 'none'; frame-ancestors 'none'")
         self.end_headers()
         self.wfile.write(payload)
 

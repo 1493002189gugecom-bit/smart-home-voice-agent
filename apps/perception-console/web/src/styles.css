@@ -109,6 +109,41 @@ button:not(.sidebar nav button):hover:not(:disabled) { background: var(--accent-
 .danger { border-color: #ebcbc5 !important; background: #fff2ef !important; color: var(--danger) !important; }
 .danger:hover:not(:disabled) { background: #fce5e0 !important; }
 .voice-layout { align-items: start; }
+.audio-panel > summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; cursor: pointer; }
+.audio-panel > summary .card-title { margin-bottom: 0; }
+.audio-panel > summary > span { color: var(--muted); font-size: 13px; white-space: nowrap; }
+.audio-panel > summary > span::after { content: " ▾"; }
+.audio-panel[open] > summary { margin-bottom: 20px; }
+.audio-panel[open] > summary > span::after { content: " ▴"; }
+.audio-panel > summary:focus-visible { outline: 2px solid #76b99d; outline-offset: 5px; }
+.voice-composer { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
+.voice-composer > label { display: block; font-size: 14px; font-weight: 700; margin-bottom: 8px; }
+.voice-composer textarea { display: block; width: 100%; min-height: 90px; max-height: 220px; resize: vertical; padding: 12px; border: 1px solid var(--line); border-radius: 10px; font: inherit; line-height: 1.6; }
+.voice-composer textarea:focus-visible { outline: 2px solid #76b99d; outline-offset: 2px; }
+.voice-composer-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-top: 10px; }
+.voice-composer-actions small, .voice-composer-hint { color: var(--muted); font-size: 12px; }
+.voice-speech-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; }
+.voice-speech-toggle input { width: auto; margin: 0; accent-color: #76b99d; }
+.voice-composer-hint { margin: 10px 0 0; }
+.voice-composer-feedback { margin: 10px 0 0; font-size: 13px; }
+.voice-workbench { padding: 14px 20px; border: 1px solid var(--line); border-radius: 14px; }
+.voice-progress, .voice-evaluation-actions, .voice-evaluation-input { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.voice-progress { font-size: 14px; }
+.voice-progress button { padding: 8px 12px; }
+.voice-timings { display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: 12px; color: var(--muted); margin-top: 10px; }
+.voice-timings strong { font-weight: 500; color: inherit; }
+.voice-partial { margin: 10px 0; font-size: 14px; }
+.voice-partial small { margin-left: 8px; color: var(--muted); }
+.voice-evaluation { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 12px; font-size: 13px; }
+.voice-evaluation summary { cursor: pointer; }
+.voice-evaluation p { color: var(--muted); line-height: 1.65; }
+.voice-evaluation-actions { justify-content: flex-start; margin-bottom: 16px; }
+.voice-evaluation-input { margin-top: 8px; flex-wrap: nowrap; }
+.voice-evaluation-input input { flex: 1; min-width: 0; padding: 10px; background: #1b2940; color: #eef1f9; border: 1px solid #45506b; border-radius: 8px; }
+.voice-evaluation-results { max-height: 280px; overflow-y: auto; }
+.voice-evaluation-results > div { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.voice-evaluation-results small, .voice-workbench-feedback { color: var(--muted); font-size: 12px; }
+.dialogue p { white-space: pre-wrap; }
 .audio-current { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 18px; }
 .audio-current > div { display: grid; gap: 5px; min-width: 0; padding: 15px; border-radius: 13px; background: #eef5ef; }
 .audio-current span { color: var(--accent-dark); font-size: 12px; font-weight: 700; }
@@ -120,7 +155,7 @@ button:not(.sidebar nav button):hover:not(:disabled) { background: var(--accent-
 .audio-feedback { margin: 14px 0 0; color: var(--accent-dark); font-size: 13px; }
 /* A fixed-height scroller, not a growing box: the conversation stays anchored at
    the newest line instead of pushing the rest of the page around. */
-.timeline { height: min(610px, 62vh); overflow-y: auto; padding-right: 4px; scroll-behavior: smooth; }
+.timeline { height: clamp(180px, 30vh, 400px); overflow-y: auto; padding-right: 4px; scroll-behavior: smooth; }
 .event-list { max-height: 610px; overflow: auto; padding-right: 4px; }
 .event { display: grid; grid-template-columns: 96px minmax(0, 1fr) auto; gap: 10px; padding: 13px 0; border-bottom: 1px solid var(--line); }
 .event strong { color: var(--accent-dark); font-size: 12px; }

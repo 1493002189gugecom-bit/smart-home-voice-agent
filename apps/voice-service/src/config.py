@@ -7,6 +7,7 @@ SMART_HOME_MODELS_DIR environment variable.
 from __future__ import annotations
 
 import os
+import math
 from pathlib import Path
 
 DEFAULT_MODELS_DIR = Path(r"D:\smart-home-models")
@@ -124,8 +125,7 @@ EDGE_RATE = "+0%"
 EDGE_VOLUME = "+0%"
 EDGE_PITCH = "+0Hz"
 EDGE_TIMEOUT_SECONDS = 30.0
-# Online synthesis needs retries: transient network hiccups otherwise surface as
-# announcement failures. A slow request is retried rather than accepted.
+# Retry transient failures only, within one shared deadline.
 EDGE_MAX_ATTEMPTS = 3
 EDGE_RETRY_DELAY_SECONDS = 1.5
 EDGE_SLOW_SECONDS = 6.0
@@ -134,11 +134,47 @@ TTS_FALLBACK_SAMPLE_RATE = 24000
 
 
 def tts_provider() -> str:
-    return os.environ.get("SMART_HOME_TTS_PROVIDER", TTS_PROVIDER).strip().lower()
+    return (_local_env("SMART_HOME_TTS_PROVIDER") or TTS_PROVIDER).strip().lower()
 
 
 def edge_voice() -> str:
-    return os.environ.get("SMART_HOME_TTS_VOICE", EDGE_VOICE).strip()
+    return _local_env("SMART_HOME_TTS_VOICE") or EDGE_VOICE
+
+
+def speech_timeout() -> float:
+    try:
+        value = float(_local_env("SMART_HOME_SPEECH_TIMEOUT") or EDGE_TIMEOUT_SECONDS)
+        return value if 0.1 <= value <= 120 else EDGE_TIMEOUT_SECONDS
+    except ValueError:
+        return EDGE_TIMEOUT_SECONDS
+
+
+def dashscope_key() -> str:
+    return _local_env("DASHSCOPE_API_KEY")
+
+
+def speech_ws_url() -> str:
+    return _local_env("SMART_HOME_SPEECH_WS_URL") or "wss://dashscope.aliyuncs.com/api-ws/v1/inference"
+
+
+def cosyvoice_model() -> str:
+    return _local_env("SMART_HOME_COSYVOICE_MODEL") or "cosyvoice-v3-flash"
+
+
+def cosyvoice_voice() -> str:
+    return _local_env("SMART_HOME_COSYVOICE_VOICE") or "longanyang"
+
+
+def asr_provider() -> str:
+    value = _local_env("SMART_HOME_ASR_PROVIDER") or "local"
+    if value not in {"local", "funasr"}:
+        raise ValueError("invalid_asr_provider")
+    return value
+
+
+def audio_processing() -> str:
+    value = _local_env("SMART_HOME_AUDIO_PROCESSING") or "auto"
+    return value if value in {"auto", "webrtc", "off"} else "auto"
 
 
 def edge_rate() -> str:
@@ -161,6 +197,20 @@ def require(path: Path) -> Path:
             f"model root = {models_dir()} (override with SMART_HOME_MODELS_DIR)"
         )
     return path
+
+
+def wake_command_merge_enabled() -> bool:
+    """Whether the wake phrase is kept as the opening of the command utterance.
+
+    Off by default would restore the old behaviour where the wake audio was thrown
+    away, which forced the user to say the command twice — and, because the wake word
+    was the only audio long enough to identify a speaker, made short commands
+    unidentifiable ("录音不足"). On is the fix; the switch exists so a regression can
+    be reverted without a code edit. Set ``SMART_HOME_WAKE_MERGE=0`` to disable.
+    """
+
+    raw = _local_env("SMART_HOME_WAKE_MERGE").strip().lower()
+    return raw not in ("0", "false", "no", "off")
 
 
 def asr_paths() -> dict:
@@ -395,6 +445,22 @@ def speaker_enrollment_samples() -> int:
     return DEFAULT_SPEAKER_ENROLL_SAMPLES
 
 
+def speaker_enrollment_accumulates() -> bool:
+    """Whether re-enrolling a person keeps their previously stored voiceprints.
+
+    On by default: a voiceprint score depends heavily on the recording session
+    (measured here as a 0.13 similarity drop between two sessions of the same
+    speaker), so discarding the old session on every re-enrolment means the template
+    can never cover more than one set of conditions. Set
+    ``SMART_HOME_SPEAKER_ENROLL_ACCUMULATE=0`` to restore whole-person replacement.
+    """
+
+    raw = _local_env("SMART_HOME_SPEAKER_ENROLL_ACCUMULATE").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return True
+
+
 # ------------------------------------------------------------------- barge-in
 # Talking over the assistant is normal in a household, so full interruption is on
 # by default. The known TTS waveform is used to reject a matching echo; the
@@ -419,6 +485,16 @@ def _local_bool(name: str, fallback: bool) -> bool:
     if raw in {"0", "false", "no", "off"}:
         return False
     return fallback
+
+
+def command_end_silence_seconds() -> float:
+    """Extra continuous VAD-negative time before committing a command.
+
+    Silero already applies its own hangover (~0.6s). Another 0.7s tolerates
+    thinking pauses without changing the interrupt detector's sensitivity.
+    """
+    value = _speaker_float("SMART_HOME_COMMAND_END_SILENCE", 0.7)
+    return value if 0.1 <= value <= 2.0 else 0.7
 
 
 def barge_in_enabled() -> bool:
@@ -447,3 +523,70 @@ def barge_echo_calibration_seconds() -> float:
     """Head of each reply used to measure leakage; it cannot be interrupted."""
 
     return _speaker_float("SMART_HOME_BARGE_ECHO_CALIBRATION", DEFAULT_BARGE_ECHO_CALIBRATION_SECONDS)
+
+
+# ----------------------------------------------------------- semantic admission
+def listening_mode() -> str:
+    value = _local_env("SMART_HOME_LISTENING_MODE").strip().lower()
+    return value if value in {"wake", "hybrid"} else "hybrid"
+
+
+def intent_provider() -> str:
+    value = _local_env("SMART_HOME_INTENT_PROVIDER").strip().lower() or "agent"
+    if value not in {"agent", "deepseek", "dashscope", "volcengine", "compatible"}:
+        raise ValueError("invalid_intent_provider")
+    return value
+
+
+def intent_api_key() -> str:
+    explicit = _local_env("SMART_HOME_INTENT_API_KEY")
+    if explicit:
+        return explicit
+    names = {"deepseek": "DEEPSEEK_API_KEY", "dashscope": "DASHSCOPE_API_KEY", "volcengine": "ARK_API_KEY"}
+    name = names.get(intent_provider())
+    return _local_env(name) if name else ""
+
+
+def intent_base_url() -> str:
+    return _local_env("SMART_HOME_INTENT_BASE_URL") or {
+        "deepseek": "https://api.deepseek.com",
+        "dashscope": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "volcengine": "https://ark.cn-beijing.volces.com/api/v3",
+    }.get(intent_provider(), "")
+
+
+def intent_model() -> str:
+    return _local_env("SMART_HOME_INTENT_MODEL") or {
+        "deepseek": "deepseek-chat", "dashscope": "qwen3.7-flash",
+    }.get(intent_provider(), "")
+
+
+def intent_response_format() -> str:
+    value = _local_env("SMART_HOME_INTENT_RESPONSE_FORMAT") or "json_object"
+    if value not in {"json_object", "json_schema", "none"}:
+        raise ValueError("invalid_intent_response_format")
+    return value
+
+
+def _bounded_intent_number(name: str, fallback: float, minimum: float, maximum: float) -> float:
+    try:
+        value = float(_local_env(name))
+    except (TypeError, ValueError):
+        return fallback
+    return value if math.isfinite(value) and minimum <= value <= maximum else fallback
+
+
+def intent_timeout_seconds() -> float:
+    return _bounded_intent_number("SMART_HOME_INTENT_TIMEOUT", 8.0, 1.0, 30.0)
+
+
+def comfort_cooldown_seconds() -> float:
+    return _bounded_intent_number("SMART_HOME_COMFORT_COOLDOWN", 60.0, 1.0, 3600.0)
+
+
+def comfort_light_step() -> int:
+    return int(_bounded_intent_number("SMART_HOME_COMFORT_LIGHT_STEP", 20, 1, 100))
+
+
+def comfort_light_brightness() -> int:
+    return int(_bounded_intent_number("SMART_HOME_COMFORT_LIGHT_BRIGHTNESS", 70, 1, 100))

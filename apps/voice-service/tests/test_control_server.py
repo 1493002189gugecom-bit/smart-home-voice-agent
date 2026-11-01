@@ -163,6 +163,36 @@ def post_json(server, path, payload):
         return exc.code, json.loads(exc.read().decode("utf-8"))
 
 
+def test_typed_transcript_route_validates_and_dispatches_without_claiming_completion():
+    import uuid
+    calls = []
+    server = create_control_server(VoiceEventBus(), port=0, on_text=lambda body: calls.append(body) or {"ok": True, "request_id": body["request_id"]})
+    start_control_server(server)
+    try:
+        body = {"text": "好热啊", "request_id": str(uuid.uuid4())}
+        assert post_json(server, "/conversation/text", body)[0] == 202
+        assert post_json(server, "/conversation/text", {**body, "speak": True})[0] == 202
+        assert post_json(server, "/conversation/text", {**body, "speak": False})[0] == 202
+        for invalid in ({**body, "speaker_id": "dad"}, {**body, "text": " "}, {**body, "text": "热" * 1501}, {**body, "request_id": "bad"}, {**body, "text": True}, {**body, "speak": "true"}, {**body, "speak": 1}):
+            assert post_json(server, "/conversation/text", invalid)[0] == 422
+        assert calls == [body, {**body, "speak": True}, {**body, "speak": False}]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_typed_transcript_unavailable_is_explicit():
+    import uuid
+    server = create_control_server(VoiceEventBus(), port=0)
+    start_control_server(server)
+    try:
+        status, body = post_json(server, "/conversation/text", {"text": "热", "request_id": str(uuid.uuid4())})
+        assert status == 503 and body["error_code"] == "text_unavailable"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_enrolment_status_is_asked_of_the_loop():
     calls = []
     server = identity_server(lambda action, body: calls.append((action, body)) or {"ok": True, "enrollment": {"state": "idle"}})

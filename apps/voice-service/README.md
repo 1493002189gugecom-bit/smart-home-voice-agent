@@ -1,7 +1,12 @@
-# Voice Service — Phase A Local Validation
+# Voice Service — Hybrid Conversation and Local Audio
 
 Voice stack: local KWS (wake word), Silero VAD, SenseVoice int8 ASR, plus
 **network-backed Edge neural TTS for announcements**.
+
+The microphone now passes through native WebRTC AEC3 and noise suppression when
+the bundled `pywebrtc-audio` wheel is available. Edge replies play sentence by
+sentence. Official CosyVoice PCM streaming and Fun-ASR realtime input are optional
+providers; the local ASR and original wake-word route remain available.
 
 Announcement synthesis uses Microsoft Edge neural voices (`edge-tts`) because
 they sound markedly more natural than the local 82M Kokoro model.
@@ -18,6 +23,160 @@ Models are stored outside the repository. On this machine the default root is
 `D:\smart-home-models`; override it with `SMART_HOME_MODELS_DIR`.
 
 ## Voice Agent (cloud LLM + real device control)
+
+### 无唤醒词与唤醒词共存
+
+2026-10-28 业务修复：等待补充房间时，只有“卧室”“我在卧室”等纯房间回答
+可以补全此前的舒适需求。“别降温了，改为关闭卧室灯”等改口会清除待执行需求，
+进入正常语义规划。单一相对调温仍纠正模型猜测的绝对温度；复合指令按各工具
+自身的参数执行，避免把“客厅调低两度”串到“卧室设为26度”上。
+
+`start-perception.ps1` 现在核对服务实际返回的后端和监听模式；已有进程与本次
+参数不一致、或 hybrid 的意图模块没有就绪时，会明确报错。修改 API 配置或模式
+后先停止旧进程再启动：`tools\stop-perception.ps1`，然后
+`tools\start-perception.ps1 -HomeBackend ha -ListeningMode hybrid`。
+未显式传入模式时，启动器读取与语音服务一致的本地配置。设备写入令牌由本机
+服务自动创建和读取，无需增加新的云 API。
+
+启用 Agent 后默认使用 `hybrid`：本地 VAD 分句，SenseVoice 得到完整文本，
+再由独立的意图 API 判断是否需要助手介入。`小屋小屋`、`你好小屋` 仍可直接
+进入原有对话路径。未启用 Agent 时保持仅唤醒词模式。
+
+```powershell
+# 在 E:\smart-home 下运行；家居服务应已启动。
+.\.venv\Scripts\python.exe apps/voice-service/src/loop.py --agent --listening-mode hybrid
+# 原有仅唤醒词模式
+.\.venv\Scripts\python.exe apps/voice-service/src/loop.py --agent --listening-mode wake
+# 原有整套启动入口也支持显式选模式；省略参数时读取配置，默认 hybrid。
+.\tools\start-perception.ps1 -ListeningMode hybrid
+.\tools\voice-check\start_agent.ps1 -ListeningMode hybrid
+```
+
+启动脚本会复用已经运行的服务；修改模式或源码后，需要先正常停止旧语音进程再启动。
+本次实现不自动重启服务。语音 `/health` 返回实际 `listening_mode`、
+`requested_listening_mode`、`intent_provider`、`intent_model`、`intent_status` 和固定错误码；`voice_state` 的
+`listening` 表示等待自然表达，`active` 表示连续对话中，`standby` 表示仅等待唤醒词。
+
+| 场景 | 行为 |
+| --- | --- |
+| “今天天气真热啊”“卧室好热” | 判断为当前舒适需求后，按本地空调策略降温并播报确认结果 |
+| “屋里好暗”“太刺眼了” | 先查灯光状态，再按本地配置开灯或调节亮度 |
+| 不知道说话人或当前位置 | 追问房间；下一句“卧室”可完成原来的舒适调节 |
+| “再低一点”“别开灯，改开空调” | 连续对话中结合上下文进入已有 Agent 工具流程 |
+| “这样就行”或静默 20 秒 | 结束本轮，继续等待自然表达和唤醒词 |
+| 普通闲聊、否定、引用、历史或假设 | 意图模块应忽略，不触发设备、不播报、不公开这段转写 |
+| 短时间重复吐槽同一设备同一方向 | 默认 60 秒内抑制重复动作及播报；明确指令仍可继续调节 |
+| 意图 API 超时、返回非法 JSON 或配置不完整 | 不放行自然控制；唤醒词入口仍可使用 |
+
+本轮声纹与新鲜摄像头定位只用于解析本轮 `self` 目标，不复用上一句的身份或位置。
+短句声纹失败可保留对话内容，但不能据此猜测说话人位置。明确说出的房间优先。
+舒适动作限定为空调温度和灯光，不由意图 API 自由调用工具；实际成功播报来自家居服务。
+灯光默认每档 20%、关灯后需要变亮时打开到 70%，亮度限制在 1–100%；
+空调档位、舒适温度和范围继续由家居服务配置决定。
+
+意图模块只返回 `kind`（`ignore/comfort/command/follow_up/end`）、`need`
+（`cooler/warmer/brighter/dimmer` 或 null）、`room`（当前句中明确出现的目录房间或 null）。
+本地严格验证字段，拒绝额外参数、设备 ID、温度等越权数据。
+
+### 在控制台打字对话
+
+打开感知控制台的“语音”栏目，在“实时对话”底部输入文字并发送。每条消息视为
+已经完成的语音转写，走相同的意图分类、舒适动作策略和 Agent 工具校验。
+文字输入不调用录音、ASR 或声纹；“播报回复”默认勾选，取消即可安静打字。
+播报使用当前选定的输出设备，与麦克风回复串行播放；文字播报期间暂停麦克风输入，
+避免扬声器回声触发新一轮。原有麦克风语音入口和语音回复的打断功能继续工作。
+
+例如输入“好热啊”，房间不明确时会追问；下一条输入“卧室”可承接调节。
+输入“这样就行”结束本轮，再发新消息即可开始下一轮。文字上下文与麦克风上下文
+独立，闲置 60 秒后清空，不复用麦克风识别出的身份或位置。开头明确输入唤醒词
+仍可进入原 Agent 对话路径。闲聊、意图服务故障、重复需求抑制会在对话区显示原因。
+
+`Enter` 发送，`Shift+Enter` 换行，中文输入法选词回车不会发送；最多 1500 字。
+每次只处理一条文字消息，结果通过现有 `/history` 和 `/events` 返回并显示在同一对话区。
+`POST /conversation/text` 接收严格的 `{request_id, text, speak?}`（布尔值，省略为 false），返回 202 只表示接收，
+`text_turn.turn_status` 的 `completed/ignored/failed` 才表示本轮结束；设备成功与否
+以 `agent_reply` 和 `tool_result` 中的实际确认结果为准。同一进程内最近 200 条请求
+按编号去重，避免响应丢失后重试导致重复控制。服务重启后记录和去重缓存清空。
+
+更新后需重启语音服务和控制台后端，并刷新网页；旧进程不会自动加载新增接口。
+启动仍使用 `tools/start-perception.ps1`。本入口使用原来的 API 配置，无需另买 API。
+
+### 意图 API 配置项
+
+默认 `SMART_HOME_INTENT_PROVIDER=agent`：复用现有 Agent 的 API Key、地址和模型，
+创建独立的意图客户端，不改动原聊天客户端。通常无需购买第二个 API。
+也可为意图识别独立配置供应商，聊天模型仍保持原配置：
+
+| 配置 | 默认 / 含义 |
+| --- | --- |
+| `SMART_HOME_LISTENING_MODE` | `hybrid`；也可设 `wake` |
+| `SMART_HOME_INTENT_PROVIDER` | `agent`；可选 `deepseek`、`dashscope`、`volcengine`、`compatible` |
+| `SMART_HOME_INTENT_API_KEY` | 独立意图 Key；未设时读取对应 `DEEPSEEK_API_KEY`、`DASHSCOPE_API_KEY` 或 `ARK_API_KEY` |
+| `SMART_HOME_INTENT_BASE_URL` | 独立兼容 API 地址；前三个供应商有默认地址 |
+| `SMART_HOME_INTENT_MODEL` | DeepSeek 默认 `deepseek-chat`，DashScope 默认 `qwen3.7-flash`；Volcengine/compatible 必填 |
+| `SMART_HOME_INTENT_RESPONSE_FORMAT` | `json_object`；模型支持时可选 `json_schema`，不支持格式参数时可选 `none`，本地仍校验 JSON |
+| `SMART_HOME_INTENT_TIMEOUT` | 8 秒，允许 1–30 秒 |
+| `SMART_HOME_COMFORT_COOLDOWN` | 60 秒，允许 1–3600 秒 |
+| `SMART_HOME_COMFORT_LIGHT_STEP` | 20，允许 1–100 |
+| `SMART_HOME_COMFORT_LIGHT_BRIGHTNESS` | 70，允许 1–100 |
+
+这些配置读取环境变量或本地忽略文件 `runtime/voice-agent/agent.env`。
+`agent` 模式忽略独立 Key/地址/模型配置，始终复用聊天客户端；换意图供应商时应明确选供应商。
+DashScope 关闭思考，Volcengine 使用 `thinking.type=disabled`；所选模型需支持对应参数和流式接口。
+Key 应保存在本地配置中，不写入源码、命令行、日志或提交。
+
+无唤醒词模式会把每段有效语音的转写及最多六条短期上下文交给所选意图 API，
+原始音频仍留在本地。被忽略的对话不进入公开事件或诊断文本日志，短期上下文仅在内存中保留。
+默认仍使用本地 SenseVoice 整句转写；可按下方配置切换 Fun-ASR 实时识别。SenseVoice 的情绪、
+声音事件作为辅助数据交给意图分类器；被模型标为音乐/非语音事件时，无唤醒词路径保守忽略，
+混合人声可能因此被误判，显式唤醒仍保留独立通路。语气标签不能保证识别反问或讽刺，
+音乐标签也不能证明电视人声来源。
+真实语义准确率、延迟和扬声器回声仍需实际验收，合成测试不能证明真实房间效果。
+自然语音超过 15 秒仍未结束时整句忽略并等到静音后恢复，避免拿尚未说完的前半句执行设备动作。
+
+### 语音可靠性、实时 API 和效果检查
+
+“语音”页可查看转写、意图判断、设备处理、合成、播放的状态与耗时；点击“停止回复”
+可取消尚未完成的意图/Agent 请求、合成和播放。已经确认的设备操作仍然有效，停止回复不回滚设备。
+文字播报仍暂停麦克风输入，使用页面按钮停止；麦克风回复保留语音打断。
+
+Edge 使用一个合成时限约束全部重试，403/401等错误立即失败；返回慢但成功的音频直接接受。
+长回复按句播放以缩短首次等待。CosyVoice 使用真正的 WebSocket PCM 增量输出。
+失败不会自动重新执行家居操作，不会自动切换到另一家付费服务。
+
+以下均可通过环境变量或本地忽略的 `runtime/voice-agent/agent.env` 配置（不要提交密钥）：
+
+| 配置 | 默认 / 含义 |
+| --- | --- |
+| `SMART_HOME_AUDIO_PROCESSING` | `auto`；原生库可用时启用 AEC3+降噪；`off`关闭，`webrtc`要求原生库可用 |
+| `SMART_HOME_SPEECH_TIMEOUT` | 30秒，允许0.1–120；网络语音请求时限 |
+| `SMART_HOME_TTS_PROVIDER` | `edge`；可选 `cosyvoice`、`kokoro` |
+| `DASHSCOPE_API_KEY` | 仅选择云端语音服务时需要，不与 DeepSeek Key 混用 |
+| `SMART_HOME_COSYVOICE_MODEL` | `cosyvoice-v3-flash` |
+| `SMART_HOME_COSYVOICE_VOICE` | `longanyang`，需与模型兼容 |
+| `SMART_HOME_SPEECH_WS_URL` | 北京兼容域名；可换为对应业务空间/地域的官方 WebSocket 地址 |
+| `SMART_HOME_ASR_PROVIDER` | `local`；`funasr`启用云端实时转写 |
+| `SMART_HOME_FUNASR_MODEL` | `fun-asr-realtime` |
+
+Fun-ASR 在说话过程中发送音频，仅最终句子进入意图/控制路径。中间结果会被修订，绝不据此执行。
+显式唤醒后的识别中字幕可实时显示；被动环境语音在语义接纳前不公开文字。云端识别会上传语音，
+本地 SenseVoice 继续提取声音事件辅助信息，原始音频不落盘。选择云端后必须正确配置密钥；
+配置缺失会明确报错，不会悄悄回退。TTS的密钥/模型问题也不会自动切换付费供应商。
+
+“检查意图识别效果”提供24个内置场景和单句试判。它只运行独立分类器，不能操作设备。
+结果仅保留在服务内存，刷新可查看；调用现有模型会产生对应 API 用量。CLI可保存仅含内置文本的报告：
+
+```powershell
+.\.venv\Scripts\python.exe tools/voice-check/evaluate_intent.py --limit 24 --output output/voice-evaluation/intent.json
+```
+
+服务接口：`GET /intent/evaluation`、`POST /intent/evaluation/start`（`{limit:24}`或`{text:"..."}`）、
+`POST /intent/evaluation/cancel`（空对象）、`POST /conversation/stop`（空对象）。均经过控制台白名单转发。
+只重载受本项目管理的语音/控制台进程后刷新页面；不要在仍运行旧后端时只刷新网页。
+
+协议参考：[CosyVoice](https://help.aliyun.com/zh/model-studio/cosyvoice-websocket-api/)、
+[Fun-ASR](https://help.aliyun.com/zh/model-studio/fun-asr-client-events)、
+[WebRTC Python 绑定](https://github.com/strands-labs/pywebrtc-audio)。
 
 With `--agent`, a transcript is sent to a cloud LLM (DeepSeek, OpenAI-compatible)
 which may call four **restricted** tools on the local `home-service`:
@@ -111,6 +270,15 @@ both the interruption and the instruction:
   (0.6 s) and requiring `SMART_HOME_BARGE_ECHO_RATIO` (1.5×) more loudness. Speech
   must last `SMART_HOME_BARGE_MIN_SPEECH` (0.3 s). In the fallback window, the
   first 0.6 s cannot interrupt.
+- **Keep the beginning**: up to 0.64 s of onset context is retained. During
+  playback it is echo-reduced or filtered against measured leakage, not blindly
+  copied from the microphone; small gaps during confirmation are retained too.
+- **Allow hesitation**: a sentence is not committed on the first negative VAD block.
+  `SMART_HOME_COMMAND_END_SILENCE` defaults to 0.7 s of additional continuous
+  VAD-negative audio (valid range 0.1–2.0 s). Silero's existing ~0.6 s hangover
+  remains, so the physical end-of-speech wait is roughly 1.3 s. This trades a
+  slightly slower response start for keeping a hesitant command in one utterance.
+  Long silence still ends the turn, and the 15 s utterance cap remains.
 - **Honest limits**: this is not full acoustic echo cancellation. Room reflections,
   device sound effects and an unusually loud speaker can still hide an interruption;
   a loud unrelated sound may stop playback. `SMART_HOME_BARGE_IN=0` restores
@@ -301,9 +469,14 @@ $env:SMART_HOME_TTS_VOICE = "zh-CN-YunyangNeural"
 $env:SMART_HOME_TTS_RATE  = "+10%"
 ```
 
-Online synthesis retries transient failures and suspiciously slow responses
-(3 attempts by default) so a network hiccup does not silently drop an
-announcement.
+Online synthesis retries transient failures (3 attempts maximum) within a shared
+deadline, accepts slow successful audio, and does not retry authentication errors.
+
+If the console reports `tts_service_rejected` (403), update the locked voice
+dependencies and restart the voice process. This project pins `edge-tts 7.3.1`;
+the older 7.2.8 client was rejected by the upstream service in the observed
+2026-10-22 failure. Synthesis and output failures are shown separately, and
+failed speech does not discard the text reply or repeat an executed operation.
 
 ## Verify devices and models without opening the microphone
 
@@ -451,8 +624,9 @@ forbidden-command terms.
 
 Say “小屋小屋” or “你好小屋”; a short two-note prompt confirms wake-up,
 then speak commands continuously. The full 20-second waiting window starts only
-after the reply finishes. Microphone blocks are discarded during processing and
-playback. Public events remain in memory for the current process. For explicit
+after the reply finishes. With interruption enabled, microphone audio is watched
+during model processing and playback, and speech becomes the next utterance.
+Public events remain in memory for the current process. For explicit
 diagnostics only, `--log-file <path>` writes timestamped JSON lines that may
 include conversation text. This Phase A loop does
 not call a cloud LLM and cannot control devices.
@@ -469,5 +643,11 @@ the fallback calibration window, and the pre-roll that must not reach ASR. Start
 and buffered-output abort are covered by `test_loop.py` and `test_playback.py`.
 These scripted checks cannot prove how your own speakers and microphone interact;
 the real check above is still required.
+
+无唤醒词的关键回归位于 `test_ambient_intent.py`、`test_comfort_actions.py`、
+`test_ambient_loop.py`：覆盖真实主循环的自然触发、追问房间、结束/超时、重复抑制、
+否定结果不公开、唤醒词共存、当前声纹边界、模型等待期间完整和未确认插话、
+取消不写设备、JSON/供应商接口限制及灯光状态边界。模型与设备边界均使用受控替身，
+不调用收费 API、不打开麦克风、不操作真实设备；语义例句的分类结果不代表真实模型质量评测。
 
 Audio, model weights, logs and `.venv` are ignored by git.

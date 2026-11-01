@@ -9,13 +9,56 @@ from __future__ import annotations
 
 import pytest
 
-from server import MAX_EMBEDDING_DIM, VisionRequestError, speaker_embeddings, speaker_query
+from server import (
+    MAX_EMBEDDING_DIM,
+    VisionRequestError,
+    speaker_embeddings,
+    speaker_enrolment,
+    speaker_query,
+)
 
 
 def test_enrolment_accepts_a_batch_of_samples():
     vectors = speaker_embeddings({"person_id": "dad", "embeddings": [[1, 0, 0], [0.9, 0.1, 0]]})
 
     assert vectors == [(1.0, 0.0, 0.0), (0.9, 0.1, 0.0)]
+
+
+class TestAccumulateField:
+    """`accumulate` is optional, so an older client must keep working unchanged."""
+
+    def test_absent_means_replace(self):
+        person_id, vectors, accumulate = speaker_enrolment({"person_id": "dad", "embeddings": [[1, 0, 0]]})
+
+        assert person_id == "dad"
+        assert vectors == [(1.0, 0.0, 0.0)]
+        assert accumulate is False
+
+    def test_true_means_keep_what_is_stored(self):
+        _person_id, _vectors, accumulate = speaker_enrolment(
+            {"person_id": "dad", "embeddings": [[1, 0, 0]], "accumulate": True}
+        )
+
+        assert accumulate is True
+
+    @pytest.mark.parametrize("value", [1, "true", "yes", None, []])
+    def test_a_non_boolean_accumulate_is_refused(self, value):
+        with pytest.raises(VisionRequestError) as caught:
+            speaker_enrolment({"person_id": "dad", "embeddings": [[1, 0, 0]], "accumulate": value})
+
+        assert caught.value.code == "invalid_accumulate"
+
+    def test_an_unknown_field_is_still_refused(self):
+        with pytest.raises(VisionRequestError) as caught:
+            speaker_enrolment({"person_id": "dad", "embeddings": [[1, 0, 0]], "acumulate": True})
+
+        assert caught.value.status == 422
+
+    def test_a_missing_person_is_still_refused(self):
+        with pytest.raises(VisionRequestError) as caught:
+            speaker_enrolment({"embeddings": [[1, 0, 0]], "accumulate": True})
+
+        assert caught.value.status == 422
 
 
 def test_an_int_is_accepted_as_a_float():

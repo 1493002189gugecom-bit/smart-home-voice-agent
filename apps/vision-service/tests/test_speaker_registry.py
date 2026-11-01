@@ -88,6 +88,89 @@ def test_dynamically_added_people_are_accepted(tmp_path):
     assert registry.persons() == [GUEST]
 
 
+def test_merge_keeps_what_was_already_stored(tmp_path):
+    """A second enrolment session must add to the template, not erase the first.
+
+    This is the whole reason `merge` exists: measured on this household's audio, two
+    sessions of the same speaker score only ~0.71 against each other, so throwing the
+    earlier session away on every re-enrolment guarantees a one-condition template.
+    """
+    registry = SpeakerRegistry(tmp_path, PACK)
+    registry.replace(DAD, [vector(1, 0, 0), vector(0.9, 0.1, 0)])
+
+    kept, added = registry.merge(DAD, [vector(0.7, 0.7, 0)])
+
+    assert (kept, added) == (2, 1)
+    assert registry.counts()[DAD] == 3
+
+
+def test_merge_creates_the_person_when_absent(tmp_path):
+    registry = SpeakerRegistry(tmp_path, PACK)
+
+    kept, added = registry.merge(GUEST, [vector(1, 0, 0)])
+
+    assert (kept, added) == (0, 1)
+    assert registry.persons() == [GUEST]
+
+
+def test_merge_skips_a_recording_that_is_already_known(tmp_path):
+    """Re-saving the same recording must not add weight without information."""
+    registry = SpeakerRegistry(tmp_path, PACK)
+    registry.replace(DAD, [vector(1, 0, 0)])
+
+    kept, added = registry.merge(DAD, [vector(1, 0, 0)])
+
+    assert (kept, added) == (1, 0)
+    assert registry.counts()[DAD] == 1
+
+
+def test_merge_refuses_a_recording_unlike_the_stored_voiceprint(tmp_path):
+    """Widening a template to "matches anyone" is the failure this gallery prevents."""
+    registry = SpeakerRegistry(tmp_path, PACK)
+    registry.replace(DAD, [vector(1, 0, 0)])
+
+    with pytest.raises(ValueError):
+        registry.merge(DAD, [vector(0, 1, 0)])
+
+    assert registry.counts()[DAD] == 1
+
+
+def test_merge_refuses_an_empty_batch(tmp_path):
+    registry = SpeakerRegistry(tmp_path, PACK)
+
+    with pytest.raises(ValueError):
+        registry.merge(DAD, [])
+
+
+def test_merge_refuses_a_different_dimension(tmp_path):
+    registry = SpeakerRegistry(tmp_path, PACK)
+    registry.replace(DAD, [vector(1, 0, 0)])
+
+    with pytest.raises(ValueError):
+        registry.merge(DAD, [vector(1, 0, 0, 0)])
+
+
+def test_merge_never_exceeds_the_per_person_limit(tmp_path):
+    from registry import _MAX_PROTOTYPES_PER_PERSON
+
+    registry = SpeakerRegistry(tmp_path, PACK)
+    # 32 mutually dissimilar-enough directions is awkward; use near-parallel vectors
+    # so every candidate clears the consistency gate but none is a duplicate.
+    base = [vector(1.0, i / 100.0, 0.0) for i in range(_MAX_PROTOTYPES_PER_PERSON)]
+    registry.replace(DAD, base)
+
+    registry.merge(DAD, [vector(1.0, 0.5, 0.0)])
+
+    assert registry.counts()[DAD] == _MAX_PROTOTYPES_PER_PERSON
+
+
+def test_merge_refuses_an_invalid_person_id(tmp_path):
+    registry = SpeakerRegistry(tmp_path, PACK)
+
+    with pytest.raises(ValueError):
+        registry.merge("guests", [vector(1, 0, 0)])
+
+
 @requires_dpapi
 def test_a_face_file_copied_over_the_voiceprint_file_is_refused(tmp_path):
     """The two galleries must never be interchangeable, even for one user."""
